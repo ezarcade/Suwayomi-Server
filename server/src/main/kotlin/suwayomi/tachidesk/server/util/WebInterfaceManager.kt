@@ -205,24 +205,35 @@ object WebInterfaceManager {
         val tempWebUIRoot = createServableDirectory()
         val orgIndexHtml = File("$tempWebUIRoot/index.html")
 
-        if (ServerSubpath.isDefined() && orgIndexHtml.exists()) {
+        if (orgIndexHtml.exists()) {
             val originalIndexHtml = orgIndexHtml.readText()
-            val subpathInjectionBaseTag = "<base href=\"${ServerSubpath.asRootPath()}\">"
 
-            val indexHtmlWithSubpathInjection =
-                originalIndexHtml.replace(
-                    "<head>",
-                    "<head>$subpathInjectionBaseTag",
-                )
+            var modifiedIndexHtml = if (ServerSubpath.isDefined()) {
+                val subpathInjectionBaseTag = "<base href=\"${ServerSubpath.asRootPath()}\">"
+                originalIndexHtml.replace("<head>", "<head>$subpathInjectionBaseTag")
+            } else {
+                originalIndexHtml
+            }
 
-            orgIndexHtml.writeText(indexHtmlWithSubpathInjection)
+            modifiedIndexHtml = modifiedIndexHtml.replace(
+                "<head>",
+                "<head><script src=\"custom-patch.js\"></script>",
+            )
+
+            orgIndexHtml.writeText(modifiedIndexHtml)
         }
 
         return tempWebUIRoot
     }
 
     private fun createServableDirectory(): String {
-        val originalWebUIRoot = applicationDirs.webUIRoot
+        val externalPath = serverConfig.webUIExternalPath.value
+        val originalWebUIRoot = if (externalPath.isNotEmpty()) {
+            logger.info { "Using external WebUI path: $externalPath" }
+            externalPath
+        } else {
+            applicationDirs.webUIRoot
+        }
         val tempWebUIRoot = applicationDirs.webUIServe
 
         File(tempWebUIRoot).deleteRecursively()
@@ -231,6 +242,20 @@ object WebInterfaceManager {
         File(originalWebUIRoot).copyRecursively(File(tempWebUIRoot), overwrite = true)
 
         logger.debug { "Created servable WebUI directory at: $tempWebUIRoot" }
+
+        // Copy custom-patch.js resource to the servable directory
+        try {
+            val patchResource = BuildConfig::class.java.getResourceAsStream("/custom-patch.js")
+            if (patchResource != null) {
+                val patchFile = File(tempWebUIRoot, "custom-patch.js")
+                patchResource.use { input -> patchFile.outputStream().use { output -> input.copyTo(output) } }
+                logger.debug { "Copied custom-patch.js to $tempWebUIRoot" }
+            } else {
+                logger.warn { "custom-patch.js resource not found" }
+            }
+        } catch (e: Exception) {
+            logger.warn(e) { "Failed to copy custom-patch.js" }
+        }
 
         // Return canonical path to avoid Jetty alias issues
         return File(tempWebUIRoot).canonicalPath

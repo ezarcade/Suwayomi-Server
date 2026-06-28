@@ -26,7 +26,9 @@ import suwayomi.tachidesk.graphql.types.ChapterNodeList
 import suwayomi.tachidesk.graphql.types.ChapterNodeList.Companion.toNodeList
 import suwayomi.tachidesk.graphql.types.ChapterType
 import suwayomi.tachidesk.manga.model.table.ChapterTable
+import suwayomi.tachidesk.manga.model.table.MangaMetaTable
 import suwayomi.tachidesk.server.JavalinSetup.future
+import kotlinx.serialization.json.Json
 
 class ChapterDataLoader : KotlinDataLoader<Int, ChapterType> {
     override val dataLoaderName = "ChapterDataLoader"
@@ -56,11 +58,27 @@ class ChaptersForMangaDataLoader : KotlinDataLoader<Int, ChapterNodeList> {
             future {
                 transaction {
                     addLogger(Slf4jSqlDebugLogger)
+                    val filteredScanlatorsByManga = MangaMetaTable
+                        .selectAll()
+                        .where { (MangaMetaTable.ref inList ids) and (MangaMetaTable.key eq "filteredScanlators") }
+                        .associate { it[MangaMetaTable.ref].value to it[MangaMetaTable.value] }
+                        .mapValues { (_, value) ->
+                            try {
+                                Json.decodeFromString<List<String>>(value)
+                            } catch (e: Exception) {
+                                emptyList()
+                            }
+                        }
+
                     val chaptersByMangaId =
                         ChapterTable
                             .selectAll()
                             .where { ChapterTable.manga inList ids }
                             .map { ChapterType(it) }
+                            .filter {
+                                val filtered = filteredScanlatorsByManga[it.mangaId] ?: emptyList()
+                                it.scanlator !in filtered
+                            }
                             .groupBy { it.mangaId }
                     ids.map { (chaptersByMangaId[it] ?: emptyList()).toNodeList() }
                 }
@@ -98,15 +116,29 @@ class UnreadChapterCountForMangaDataLoader : KotlinDataLoader<Int, Int> {
             future {
                 transaction {
                     addLogger(Slf4jSqlDebugLogger)
-                    val unreadChapterCountByMangaId =
+                    val filteredScanlatorsByManga = MangaMetaTable
+                        .selectAll()
+                        .where { (MangaMetaTable.ref inList ids) and (MangaMetaTable.key eq "filteredScanlators") }
+                        .associate { it[MangaMetaTable.ref].value to it[MangaMetaTable.value] }
+                        .mapValues { (_, value) ->
+                            try {
+                                Json.decodeFromString<List<String>>(value)
+                            } catch (e: Exception) {
+                                emptyList()
+                            }
+                        }
+
+                    val unreadChapters =
                         ChapterTable
-                            .select(ChapterTable.manga, ChapterTable.isRead.count())
-                            .where {
-                                (ChapterTable.manga inList ids) and
-                                    (ChapterTable.isRead eq false)
-                            }.groupBy(ChapterTable.manga)
-                            .associate { it[ChapterTable.manga].value to it[ChapterTable.isRead.count()] }
-                    ids.map { unreadChapterCountByMangaId[it]?.toInt() ?: 0 }
+                            .selectAll()
+                            .where { (ChapterTable.manga inList ids) and (ChapterTable.isRead eq false) }
+                            .filter {
+                                val mangaId = it[ChapterTable.manga].value
+                                val filtered = filteredScanlatorsByManga[mangaId] ?: emptyList()
+                                it[ChapterTable.scanlator] !in filtered
+                            }
+                            .groupBy { it[ChapterTable.manga].value }
+                    ids.map { unreadChapters[it]?.size ?: 0 }
                 }
             }
         }
@@ -249,11 +281,28 @@ class FirstUnreadChapterForMangaDataLoader : KotlinDataLoader<Int, ChapterType> 
             future {
                 transaction {
                     addLogger(Slf4jSqlDebugLogger)
+                    val filteredScanlatorsByManga = MangaMetaTable
+                        .selectAll()
+                        .where { (MangaMetaTable.ref inList ids) and (MangaMetaTable.key eq "filteredScanlators") }
+                        .associate { it[MangaMetaTable.ref].value to it[MangaMetaTable.value] }
+                        .mapValues { (_, value) ->
+                            try {
+                                Json.decodeFromString<List<String>>(value)
+                            } catch (e: Exception) {
+                                emptyList()
+                            }
+                        }
+
                     val firstUnreadChaptersByMangaId =
                         ChapterTable
                             .selectAll()
                             .where { (ChapterTable.manga inList ids) and (ChapterTable.isRead eq false) }
                             .orderBy(ChapterTable.sourceOrder to SortOrder.ASC)
+                            .filter {
+                                val mangaId = it[ChapterTable.manga].value
+                                val filtered = filteredScanlatorsByManga[mangaId] ?: emptyList()
+                                it[ChapterTable.scanlator] !in filtered
+                            }
                             .groupBy { it[ChapterTable.manga].value }
                     ids.map { id -> firstUnreadChaptersByMangaId[id]?.let { chapters -> ChapterType(chapters.first()) } }
                 }

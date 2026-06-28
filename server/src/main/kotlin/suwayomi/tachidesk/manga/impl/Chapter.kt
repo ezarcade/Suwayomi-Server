@@ -35,6 +35,7 @@ import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.statements.toExecutable
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.jetbrains.exposed.v1.jdbc.update
+import suwayomi.tachidesk.manga.impl.Manga.getMangaMetaMap
 import suwayomi.tachidesk.manga.impl.download.DownloadManager
 import suwayomi.tachidesk.manga.impl.download.DownloadManager.EnqueueInput
 import suwayomi.tachidesk.manga.impl.track.Track
@@ -404,6 +405,25 @@ object Chapter {
             return
         }
 
+        val filteredScanlators = getMangaMetaMap(mangaId)["filteredScanlators"]?.let {
+            try {
+                Json.decodeFromString<List<String>>(it)
+            } catch (e: Exception) {
+                emptyList()
+            }
+        } ?: emptyList()
+
+        val nonFilteredNewChapters = if (filteredScanlators.isNotEmpty()) {
+            newChapters.filter { it.scanlator !in filteredScanlators }
+        } else {
+            newChapters
+        }
+
+        if (nonFilteredNewChapters.isEmpty()) {
+            log.debug { "no new chapters available after scanlator filter" }
+            return
+        }
+
         val wasInitialFetch = prevNumberOfChapters == 0
         if (wasInitialFetch) {
             log.debug { "skipping download on initial fetch" }
@@ -414,7 +434,7 @@ object Chapter {
             return
         }
 
-        val unreadChapters = Manga.getUnreadChapters(mangaId).subtract(newChapters.toSet())
+        val unreadChapters = Manga.getUnreadChapters(mangaId).subtract(nonFilteredNewChapters.toSet())
 
         val skipDueToUnreadChapters = serverConfig.excludeEntryWithUnreadChapters.value && unreadChapters.isNotEmpty()
         if (skipDueToUnreadChapters) {
@@ -422,7 +442,7 @@ object Chapter {
             return
         }
 
-        val chapterIdsToDownload = getNewChapterIdsToDownload(newChapters, prevLatestChapterNumber)
+        val chapterIdsToDownload = getNewChapterIdsToDownload(nonFilteredNewChapters, prevLatestChapterNumber)
 
         if (chapterIdsToDownload.isEmpty()) {
             log.debug { "no chapters available for download" }

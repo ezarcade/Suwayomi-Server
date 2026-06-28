@@ -14,10 +14,15 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import org.jetbrains.exposed.v1.core.and
 import org.jetbrains.exposed.v1.core.eq
+import org.jetbrains.exposed.v1.core.inList
+import org.jetbrains.exposed.v1.core.not
+import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.jetbrains.exposed.v1.jdbc.update
 import suwayomi.tachidesk.manga.impl.ChapterDownloadHelper
@@ -34,6 +39,7 @@ import suwayomi.tachidesk.manga.impl.download.model.DownloadUpdateType.PAUSED
 import suwayomi.tachidesk.manga.impl.download.model.DownloadUpdateType.PROGRESS
 import suwayomi.tachidesk.manga.impl.download.model.DownloadUpdateType.STOPPED
 import suwayomi.tachidesk.manga.model.table.ChapterTable
+import suwayomi.tachidesk.server.serverConfig
 import java.util.concurrent.CopyOnWriteArrayList
 
 class Downloader(
@@ -67,11 +73,17 @@ class Downloader(
         val download = downloadUpdate?.downloadQueueItem
         notifier(immediate, downloadUpdate)
         currentCoroutineContext().ensureActive()
-        if (download != null && download != availableSourceDownloads.firstOrNull { it.state != Error }) {
-            if (download in downloadQueue) {
-                throw PauseDownloadException()
-            } else {
-                throw StopDownloadException()
+        if (download != null) {
+            val parallelism = serverConfig.downloadParallelism.value.coerceAtLeast(1)
+            val allowedDownloads = availableSourceDownloads
+                .filter { it.state != Error }
+                .take(parallelism)
+            if (download !in allowedDownloads) {
+                if (download in downloadQueue) {
+                    throw PauseDownloadException()
+                } else {
+                    throw StopDownloadException()
+                }
             }
         }
     }
@@ -114,70 +126,131 @@ class Downloader(
     }
 
     private suspend fun run() {
+        val parallelism = serverConfig.downloadParallelism.value.coerceAtLeast(1)
+
+        if (parallelism <= 1) {
+            runSequential()
+        } else {
+            runParallel(parallelism)
+        }
+    }
+
+    private suspend fun runSequential() {
         while (downloadQueue.isNotEmpty() && currentCoroutineContext().isActive) {
             val download =
                 availableSourceDownloads.firstOrNull {
                     (it.state == Queued || it.state == Finished || (it.state == Error && it.tries < MAX_RETRIES))
                 } ?: break
 
-            val logContext = "${logger.name} - downloadChapter($download))"
-            val downloadLogger = KotlinLogging.logger(logContext)
+            downloadSingleChapterSequential(download)
+        }
+    }
 
-            downloadLogger.debug { "start" }
+    private suspend fun runParallel(parallelism: Int) {
+        while (downloadQueue.isNotEmpty() && currentCoroutineContext().isActive) {
+            val currentlyDownloading = availableSourceDownloads.count { it.state == Downloading }
+            val remainingSlots = (parallelism - currentlyDownloading).coerceAtLeast(0)
+            var launchedTasks = false
 
-            // handle cases were the downloader was stopped before the finished download could be removed from the queue
-            // otherwise, it will create an endless loop, due to never removing the finished chapter and thinking that the
-            // current download chapter was moved down in the queue
-            if (download.state == Finished) {
-                finishDownload(downloadLogger, download)
-                break
-            }
+            if (remainingSlots > 0) {
+                val batch = availableSourceDownloads.filter {
+                    (it.state == Queued || it.state == Finished || (it.state == Error && it.tries < MAX_RETRIES))
+                }.take(remainingSlots)
 
-            try {
-                download.state = Downloading
-                step(DownloadUpdate(PROGRESS, download), true)
-
-                val chapter = getChapterDownloadReadyById(download.chapterId)
-
-                if (chapter.pageCount <= 0) {
-                    throw EmptyChapterException()
-                }
-
-                download.pageCount = chapter.pageCount
-
-                ChapterDownloadHelper.download(download.mangaId, download.chapterId, download, scope) { downloadChapter, immediate ->
-                    step(downloadChapter?.let { DownloadUpdate(PROGRESS, downloadChapter) }, immediate)
-                }
-                download.state = Finished
-                transaction {
-                    ChapterTable.update(
-                        { (ChapterTable.id eq download.chapterId) },
-                    ) {
-                        it[isDownloaded] = true
+                if (batch.isNotEmpty()) {
+                    launchedTasks = true
+                    batch.forEach { download ->
+                        scope.launch {
+                            downloadSingleChapterSequential(download)
+                        }
                     }
                 }
-                finishDownload(downloadLogger, download)
-            } catch (e: CancellationException) {
-                logger.debug { "Downloader was stopped" }
-                availableSourceDownloads.filter { it.state == Downloading }.forEach { it.state = Queued }
-                notifier(false, DownloadUpdate(STOPPED, download))
-            } catch (e: PauseDownloadException) {
-                downloadLogger.debug { "paused" }
-                download.state = Queued
-                notifier(false, DownloadUpdate(PAUSED, download))
-            } catch (e: EmptyChapterException) {
-                downloadLogger.warn(e) { "failed due to" }
-                download.tries = MAX_RETRIES
+            }
+
+            if (!launchedTasks && currentlyDownloading == 0) break
+
+            delay(200)
+        }
+    }
+
+    private suspend fun downloadSingleChapterSequential(download: DownloadQueueItem) {
+        val logContext = "${logger.name} - downloadChapter($download))"
+        val downloadLogger = KotlinLogging.logger(logContext)
+
+        downloadLogger.debug { "start" }
+
+        // handle cases were the downloader was stopped before the finished download could be removed from the queue
+        // otherwise, it will create an endless loop, due to never removing the finished chapter and thinking that the
+        // current download chapter was moved down in the queue
+        if (download.state == Finished) {
+            finishDownload(downloadLogger, download)
+            return
+        }
+
+        try {
+            download.state = Downloading
+            step(DownloadUpdate(PROGRESS, download), true)
+
+            val chapter = getChapterDownloadReadyById(download.chapterId)
+
+            if (chapter.pageCount <= 0) {
+                throw EmptyChapterException()
+            }
+
+            download.pageCount = chapter.pageCount
+
+            ChapterDownloadHelper.download(download.mangaId, download.chapterId, download, scope) { downloadChapter, immediate ->
+                step(downloadChapter?.let { DownloadUpdate(PROGRESS, downloadChapter) }, immediate)
+            }
+            download.state = Finished
+            transaction {
+                ChapterTable.update(
+                    { (ChapterTable.id eq download.chapterId) },
+                ) {
+                    it[isDownloaded] = true
+                }
+
+                val duplicateChapterIds = ChapterTable
+                    .selectAll()
+                    .where {
+                        (ChapterTable.manga eq download.mangaId) and
+                        (ChapterTable.chapter_number eq chapter.chapterNumber) and
+                        (ChapterTable.isDownloaded eq true) and
+                        not(ChapterTable.id eq download.chapterId)
+                    }
+                    .map { it[ChapterTable.id].value }
+
+                if (duplicateChapterIds.isNotEmpty()) {
+                    downloadLogger.debug { "deleting duplicate chapters: $duplicateChapterIds" }
+                    duplicateChapterIds.forEach { dupId ->
+                        ChapterDownloadHelper.delete(download.mangaId, dupId)
+                    }
+                    ChapterTable.update({ ChapterTable.id inList duplicateChapterIds }) {
+                        it[isDownloaded] = false
+                    }
+                }
+            }
+            finishDownload(downloadLogger, download)
+        } catch (e: CancellationException) {
+            logger.debug { "Downloader was stopped" }
+            availableSourceDownloads.filter { it.state == Downloading }.forEach { it.state = Queued }
+            notifier(false, DownloadUpdate(STOPPED, download))
+        } catch (e: PauseDownloadException) {
+            downloadLogger.debug { "paused" }
+            download.state = Queued
+            notifier(false, DownloadUpdate(PAUSED, download))
+        } catch (e: EmptyChapterException) {
+            downloadLogger.warn(e) { "failed due to" }
+            download.tries = MAX_RETRIES
+            download.state = Error
+            notifier(false, DownloadUpdate(ERROR, download))
+        } catch (e: Exception) {
+            downloadLogger.warn(e) { "failed due to" }
+            download.tries++
+            download.state = Queued
+            if (download.tries >= MAX_RETRIES) {
                 download.state = Error
                 notifier(false, DownloadUpdate(ERROR, download))
-            } catch (e: Exception) {
-                downloadLogger.warn(e) { "failed due to" }
-                download.tries++
-                download.state = Queued
-                if (download.tries >= MAX_RETRIES) {
-                    download.state = Error
-                    notifier(false, DownloadUpdate(ERROR, download))
-                }
             }
         }
     }

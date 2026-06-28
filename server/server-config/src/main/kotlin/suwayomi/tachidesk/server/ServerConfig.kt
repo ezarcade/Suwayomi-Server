@@ -212,6 +212,14 @@ class ServerConfig(
         description = "Time in hours",
     )
 
+    val webUIExternalPath: MutableStateFlow<String> by StringSetting(
+        protoNumber = 100,
+        group = SettingGroup.WEB_UI,
+        privacySafe = true,
+        defaultValue = "",
+        description = "Path to an external WebUI directory to serve from instead of the bundled one. Leave empty to use the default.",
+    )
+
     val downloadAsCbz: MutableStateFlow<Boolean> by BooleanSetting(
         protoNumber = 15,
         group = SettingGroup.DOWNLOADER,
@@ -274,6 +282,26 @@ class ServerConfig(
         privacySafe = true,
         defaultValue = false,
         description = "Ignore re-uploaded chapters from auto-download",
+    )
+
+    val downloadParallelism: MutableStateFlow<Int> by IntSetting(
+        protoNumber = 98,
+        group = SettingGroup.DOWNLOADER,
+        privacySafe = true,
+        defaultValue = 1,
+        min = 1,
+        max = 10,
+        description = "How many chapters from the same source to download in parallel",
+    )
+
+    val pageDownloadParallelism: MutableStateFlow<Int> by IntSetting(
+        protoNumber = 99,
+        group = SettingGroup.DOWNLOADER,
+        privacySafe = true,
+        defaultValue = 1,
+        min = 1,
+        max = 10,
+        description = "How many pages from the same chapter to download in parallel",
     )
 
     @Deprecated("Will get removed", replaceWith = ReplaceWith("extensionStores"))

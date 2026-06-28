@@ -24,7 +24,6 @@ import io.github.reactivecircus.cache4k.Cache
 import io.javalin.http.HttpStatus
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.serialization.json.Json
 import okhttp3.CacheControl
 import okhttp3.Response
 import org.jetbrains.exposed.v1.core.ResultRow
@@ -57,6 +56,7 @@ import suwayomi.tachidesk.manga.model.table.MangaTable
 import suwayomi.tachidesk.manga.model.table.toDataClass
 import suwayomi.tachidesk.server.ApplicationDirs
 import uy.kohesive.injekt.injectLazy
+import kotlinx.serialization.json.Json
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -95,6 +95,10 @@ object Manga {
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
+        val mangaId = mangaEntry[MangaTable.id].value
+        val metaMap = getMangaMetaMap(mangaId)
+        val scanlatorPriority = metaMap["scanlatorPriority"]
+
         val sManga =
             SManga.create().apply {
                 url = mangaEntry[MangaTable.url]
@@ -102,7 +106,11 @@ object Manga {
                 thumbnail_url = mangaEntry[MangaTable.thumbnail_url]
                 artist = mangaEntry[MangaTable.artist]
                 author = mangaEntry[MangaTable.author]
-                description = mangaEntry[MangaTable.description]
+                description = if (scanlatorPriority != null) {
+                    "${mangaEntry[MangaTable.description] ?: ""} ||suwayomi_meta:scanlatorPriority=$scanlatorPriority||"
+                } else {
+                    mangaEntry[MangaTable.description]
+                }
                 genre = mangaEntry[MangaTable.genre]
                 status = mangaEntry[MangaTable.status]
                 update_strategy = UpdateStrategy.valueOf(mangaEntry[MangaTable.updateStrategy])
@@ -481,14 +489,25 @@ object Manga {
             ChapterTable.selectAll().where { ChapterTable.manga eq mangaId }.maxByOrNull { it[ChapterTable.sourceOrder] }
         }?.let { ChapterTable.toDataClass(it) }
 
-    fun getUnreadChapters(mangaId: Int): List<ChapterDataClass> =
-        transaction {
+    fun getUnreadChapters(mangaId: Int): List<ChapterDataClass> {
+        val filteredScanlators = getMangaMetaMap(mangaId)["filteredScanlators"]?.let {
+            try {
+                Json.decodeFromString<List<String>>(it)
+            } catch (e: Exception) {
+                emptyList()
+            }
+        } ?: emptyList()
+
+        return transaction {
             ChapterTable
                 .selectAll()
                 .where { (ChapterTable.manga eq mangaId) and (ChapterTable.isRead eq false) }
                 .orderBy(ChapterTable.sourceOrder to SortOrder.DESC)
                 .map { ChapterTable.toDataClass(it) }
+        }.filter { chapter ->
+            filteredScanlators.isEmpty() || chapter.scanlator !in filteredScanlators
         }
+    }
 
     fun isInIncludedDownloadCategory(
         logContext: KLogger = logger,
