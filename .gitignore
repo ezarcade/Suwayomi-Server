@@ -15,6 +15,9 @@ AndroidCompat/out
 # WebUI is either to be downloaded on-demand or is a dynamic build asset
 server/src/main/resources/WebUI.zip
 
+# local launcher (personal)
+run.bat
+
 # bundling stage downlaoded assets
 scripts/OpenJDK*
 scripts/zulu*
