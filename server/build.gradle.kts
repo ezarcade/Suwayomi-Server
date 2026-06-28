@@ -116,11 +116,12 @@ jte {
     generate()
 }
 
+val extraJvmArgs: List<String> = (project.findProperty("appJvmArgs") as? String)?.split(" ")?.filter { it.isNotBlank() } ?: emptyList()
 application {
     applicationDefaultJvmArgs =
         listOf(
             "-Djunrar.extractor.thread-keep-alive-seconds=30",
-        )
+        ) + extraJvmArgs
     mainClass.set(MainClass)
 }
 

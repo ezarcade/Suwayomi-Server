@@ -21,6 +21,8 @@ import suwayomi.tachidesk.graphql.types.ChapterType
 import suwayomi.tachidesk.graphql.types.MangaMetaType
 import suwayomi.tachidesk.graphql.types.MangaType
 import suwayomi.tachidesk.graphql.types.MetaInput
+import graphql.schema.DataFetchingEnvironment
+import suwayomi.tachidesk.manga.impl.ChapterDownloadHelper
 import suwayomi.tachidesk.manga.impl.Library
 import suwayomi.tachidesk.manga.impl.Manga
 import suwayomi.tachidesk.manga.impl.update.IUpdater
@@ -415,5 +417,57 @@ class MangaMutation {
             }
 
         return DeleteMangaMetasPayload(clientMutationId, allDeletedMetas, mangas)
+    }
+
+    data class MarkLocalDownloadsInput(
+        val clientMutationId: String? = null,
+        val mangaId: Int,
+        val chapterIds: List<Int>,
+    )
+
+    data class MarkLocalDownloadsPayload(
+        val clientMutationId: String?,
+        val chapters: List<ChapterType>,
+    )
+
+    @RequireAuth
+    fun markLocalDownloads(
+        dataFetchingEnvironment: DataFetchingEnvironment,
+        input: MarkLocalDownloadsInput
+    ): MarkLocalDownloadsPayload? {
+        val (clientMutationId, mangaId, chapterIds) = input
+
+        val updatedChapters = transaction {
+            val rows = ChapterTable
+                .selectAll()
+                .where { (ChapterTable.id inList chapterIds) and (ChapterTable.manga eq mangaId) }
+                .toList()
+
+            rows.map { row ->
+                val id = row[ChapterTable.id].value
+                val imageCount = try {
+                    ChapterDownloadHelper.getImageCount(mangaId, id)
+                } catch (e: Exception) {
+                    -1
+                }
+
+                ChapterTable.update({ ChapterTable.id eq id }) { update ->
+                    update[isDownloaded] = true
+                    if (imageCount > 0) {
+                        update[pageCount] = imageCount
+                    }
+                }
+
+                val updatedRow = ChapterTable.selectAll().where { ChapterTable.id eq id }.first()
+                ChapterType(updatedRow)
+            }
+        }
+
+        updatedChapters.forEach {
+            ChapterType.clearCacheFor(it.id, it.mangaId, dataFetchingEnvironment)
+        }
+        MangaType.clearCacheFor(mangaId, dataFetchingEnvironment)
+
+        return MarkLocalDownloadsPayload(clientMutationId, updatedChapters)
     }
 }

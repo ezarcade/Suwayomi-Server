@@ -13,6 +13,8 @@ import graphql.schema.DataFetchingEnvironment
 import org.jetbrains.exposed.v1.core.Column
 import org.jetbrains.exposed.v1.core.Op
 import org.jetbrains.exposed.v1.core.SortOrder
+import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.eq
 import org.jetbrains.exposed.v1.core.greater
 import org.jetbrains.exposed.v1.core.inList
 import org.jetbrains.exposed.v1.core.inSubQuery
@@ -48,6 +50,12 @@ import suwayomi.tachidesk.graphql.types.MangaType
 import suwayomi.tachidesk.manga.model.table.CategoryMangaTable
 import suwayomi.tachidesk.manga.model.table.MangaStatus
 import suwayomi.tachidesk.manga.model.table.MangaTable
+import suwayomi.tachidesk.manga.model.table.ChapterTable
+import suwayomi.tachidesk.manga.model.table.toDataClass
+import suwayomi.tachidesk.graphql.types.ChapterType
+import suwayomi.tachidesk.manga.impl.util.getChapterDownloadPath
+import suwayomi.tachidesk.manga.impl.util.getChapterCbzPath
+import java.io.File
 import java.util.concurrent.CompletableFuture
 
 class MangaQuery {
@@ -321,5 +329,36 @@ class MangaQuery {
                 ),
             totalCount = queryResults.total.toInt(),
         )
+    }
+
+    @RequireAuth
+    fun allScanlators(
+        mangaId: Int
+    ): List<String> {
+        return transaction {
+            ChapterTable
+                .select(ChapterTable.scanlator)
+                .where { ChapterTable.manga eq mangaId }
+                .mapNotNull { it[ChapterTable.scanlator] }
+                .distinct()
+        }
+    }
+
+    @RequireAuth
+    fun checkLocalDownloads(
+        mangaId: Int
+    ): List<ChapterType> {
+        return transaction {
+            val chapters = ChapterTable
+                .selectAll()
+                .where { (ChapterTable.manga eq mangaId) and (ChapterTable.isDownloaded eq false) }
+                .map { ChapterTable.toDataClass(it) }
+
+            chapters.filter { chapter ->
+                val folder = File(getChapterDownloadPath(mangaId, chapter.id))
+                val cbz = File(getChapterCbzPath(mangaId, chapter.id))
+                folder.exists() || cbz.exists()
+            }.map { ChapterType(it) }
+        }
     }
 }
