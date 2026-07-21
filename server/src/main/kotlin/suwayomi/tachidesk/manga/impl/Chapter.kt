@@ -15,6 +15,7 @@ import eu.kanade.tachiyomi.source.online.HttpSource
 import eu.kanade.tachiyomi.util.chapter.ChapterRecognition
 import eu.kanade.tachiyomi.util.chapter.ChapterSanitizer.sanitize
 import io.github.oshai.kotlinlogging.KotlinLogging
+import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -46,10 +47,13 @@ import suwayomi.tachidesk.manga.model.dataclass.PaginatedList
 import suwayomi.tachidesk.manga.model.dataclass.paginatedFrom
 import suwayomi.tachidesk.manga.model.table.ChapterMetaTable
 import suwayomi.tachidesk.manga.model.table.ChapterTable
+import suwayomi.tachidesk.manga.model.table.MangaMetaTable
 import suwayomi.tachidesk.manga.model.table.MangaTable
 import suwayomi.tachidesk.manga.model.table.PageTable
 import suwayomi.tachidesk.manga.model.table.toDataClass
+import suwayomi.tachidesk.manga.impl.util.getMangaDownloadDir
 import suwayomi.tachidesk.server.serverConfig
+import java.io.File
 import java.time.Instant
 import java.util.TreeSet
 import kotlin.math.max
@@ -71,7 +75,7 @@ object Chapter {
         onlineFetch: Boolean = false,
     ): List<ChapterDataClass> =
         if (onlineFetch) {
-            getSourceChapters(mangaId)
+            getSourceChapters(mangaId).filterHidden(mangaId)
         } else {
             transaction {
                 ChapterTable
@@ -81,8 +85,12 @@ object Chapter {
                     .map {
                         ChapterTable.toDataClass(it)
                     }
-            }.ifEmpty {
-                getSourceChapters(mangaId)
+            }.let { chapters ->
+                if (chapters.isEmpty()) {
+                    getSourceChapters(mangaId).filterHidden(mangaId)
+                } else {
+                    chapters.filterHidden(mangaId)
+                }
             }
         }
 
@@ -237,6 +245,15 @@ object Chapter {
                 }
             }
 
+        // delete downloaded files for orphaned chapters before removing DB records
+        val downloadedOrphanIds = chaptersInDb
+            .filter { !chapterUrls.contains(it.url) && it.downloaded }
+            .map { it.id }
+        downloadedOrphanIds.forEach { ChapterDownloadHelper.delete(mangaEntry[MangaTable.id].value, it) }
+        if (downloadedOrphanIds.isNotEmpty()) {
+            logger.info { "deleted ${downloadedOrphanIds.size} hidden chapter download(s) from disk" }
+        }
+
         suspendTransaction {
             // we got some clean up due
             if (chaptersIdsToDelete.isNotEmpty()) {
@@ -345,6 +362,55 @@ object Chapter {
             }
         }
 
+        val mangaId = mangaEntry[MangaTable.id].value
+        val autoDeleteOrphanFractional = transaction {
+            MangaMetaTable.selectAll()
+                .where { (MangaMetaTable.ref eq mangaId) and (MangaMetaTable.key eq "autoDeleteOrphanFractional") }
+                .firstOrNull()?.let { it[MangaMetaTable.value].toBoolean() }
+        } ?: false
+
+        if (autoDeleteOrphanFractional && insertedChapterIds.isNotEmpty()) {
+            val insertedChaptersForCheck =
+                transaction {
+                    ChapterTable
+                        .select(ChapterTable.id, ChapterTable.chapter_number, ChapterTable.manga)
+                        .where { ChapterTable.id inList insertedChapterIds }
+                        .map { it[ChapterTable.id].value to it[ChapterTable.chapter_number] }
+                }
+
+            val integerChapterNumbers = insertedChaptersForCheck
+                .map { (_, num) -> num }
+                .filter { it % 1f == 0f && it >= 0f }
+                .toSet()
+
+            if (integerChapterNumbers.isNotEmpty()) {
+                val chaptersToDeleteDownloads =
+                    transaction {
+                        ChapterTable
+                            .selectAll()
+                            .where { (ChapterTable.manga eq mangaId) and (ChapterTable.isDownloaded eq true) }
+                            .map { ChapterTable.toDataClass(it) }
+                            .filter { dbChapter ->
+                                val isFractional = dbChapter.chapterNumber % 1f != 0f
+                                val intPart = dbChapter.chapterNumber.toInt().toFloat()
+                                isFractional && intPart in integerChapterNumbers
+                            }
+                    }
+
+                if (chaptersToDeleteDownloads.isNotEmpty()) {
+                    val chapterIdsToDelete = chaptersToDeleteDownloads.map { it.id }
+                    logger.info { "auto-deleting ${chapterIdsToDelete.size} orphan fractional download(s)" }
+                    chaptersToDeleteDownloads.forEach { ChapterDownloadHelper.delete(mangaId, it.id) }
+                    transaction {
+                        ChapterTable.update({ ChapterTable.id inList chapterIdsToDelete }) {
+                            it[isDownloaded] = false
+                            it[pageCount] = -1
+                        }
+                    }
+                }
+            }
+        }
+
         if (mangaEntry[MangaTable.inLibrary]) {
             // We have to query the inserted chapters to get the up-to-date data. I.e. "last_modified_at" is not returned by the insert statement, due to being set by a DB trigger
             val insertedChapters =
@@ -354,7 +420,7 @@ object Chapter {
                     )
                 }
             downloadNewChapters(
-                mangaEntry[MangaTable.id].value,
+                mangaId,
                 currentLatestChapterNumber,
                 numberOfCurrentChapters,
                 insertedChapters,
@@ -429,7 +495,15 @@ object Chapter {
             return
         }
 
-        val chapterIdsToDownload = getNewChapterIdsToDownload(nonFilteredNewChapters, prevLatestChapterNumber)
+        val hidingRules = loadChapterHidingRulesForManga(mangaId)
+        val chaptersToDownload = nonFilteredNewChapters.filter { !hidingRules.shouldHide(it.chapterNumber, it.scanlator) }
+
+        if (chaptersToDownload.isEmpty()) {
+            log.debug { "no new chapters available after hiding rules filter" }
+            return
+        }
+
+        val chapterIdsToDownload = getNewChapterIdsToDownload(chaptersToDownload, prevLatestChapterNumber)
 
         if (chapterIdsToDownload.isEmpty()) {
             log.debug { "no chapters available for download" }
@@ -766,6 +840,100 @@ object Chapter {
         }
     }
 
+    fun getHiddenDownloadedChapters(mangaId: Int): List<ChapterDataClass> {
+        val allChapters = transaction {
+            ChapterTable.selectAll()
+                .where { ChapterTable.manga eq mangaId }
+                .map { ChapterTable.toDataClass(it) }
+        }
+        val result = mutableListOf<ChapterDataClass>()
+
+        if (allChapters.isNotEmpty()) {
+            val rules = loadChapterHidingRulesForManga(mangaId)
+            val numbers = allChapters.map { it.chapterNumber }.toSet()
+            val filteredScanlators = getMangaMetaMap(mangaId)["filteredScanlators"]?.let {
+                try { Json.decodeFromString<List<String>>(it).toSet() } catch (_: Exception) { emptySet() }
+            } ?: emptySet()
+            result.addAll(allChapters.filter { chapter ->
+                chapter.downloaded && (
+                    chapter.scanlator in filteredScanlators ||
+                    rules.shouldHide(chapter.chapterNumber, chapter.scanlator, numbers)
+                )
+            })
+        }
+
+        // scan filesystem for orphaned download files that have no DB record
+        val rootDir = File(runBlocking { getMangaDownloadDir(mangaId) })
+        if (rootDir.exists()) {
+            val knownDirs = allChapters.map { chapter ->
+                xyz.nulldev.androidcompat.util.SafePath.buildValidFilename(
+                    if (chapter.scanlator != null) "${chapter.scanlator}_${chapter.name}" else chapter.name
+                )
+            }.toSet()
+            rootDir.listFiles()?.forEach { entry ->
+                val name = entry.name.removeSuffix(".cbz")
+                if (name !in knownDirs) {
+                    result.add(ChapterDataClass(
+                        id = 0,
+                        url = entry.absolutePath,
+                        name = entry.name,
+                        uploadDate = 0L,
+                        chapterNumber = -1f,
+                        scanlator = null,
+                        mangaId = mangaId,
+                        read = false,
+                        bookmarked = false,
+                        lastPageRead = 0,
+                        lastReadAt = 0,
+                        index = -1,
+                        fetchedAt = 0,
+                        downloaded = true,
+                        realUrl = entry.absolutePath,
+                    ))
+                }
+            }
+        }
+
+        return result
+    }
+
+    fun pruneHiddenDownloads(mangaId: Int): Int {
+        val hiddenDownloaded = getHiddenDownloadedChapters(mangaId)
+        var total = 0
+
+        val normalChapters = hiddenDownloaded.filter { it.id > 0 }
+        val orphanChapters = hiddenDownloaded.filter { it.id == 0 }
+
+        if (normalChapters.isNotEmpty()) {
+            normalChapters.forEach { runBlocking { ChapterDownloadHelper.delete(mangaId, it.id) } }
+            val ids = normalChapters.map { it.id }
+            transaction {
+                ChapterTable.update({ ChapterTable.id inList ids }) {
+                    it[isDownloaded] = false
+                    it[pageCount] = -1
+                }
+            }
+            total += normalChapters.size
+            logger.info { "pruned ${normalChapters.size} hidden chapter download(s) from DB for manga $mangaId" }
+        }
+
+        if (orphanChapters.isNotEmpty()) {
+            orphanChapters.forEach { chapter ->
+                val path = chapter.realUrl
+                if (path != null) {
+                    val file = File(path)
+                    if (file.exists()) {
+                        if (file.isDirectory) file.deleteRecursively() else file.delete()
+                    }
+                }
+            }
+            total += orphanChapters.size
+            logger.info { "deleted ${orphanChapters.size} orphaned download file(s) from disk for manga $mangaId" }
+        }
+
+        return total
+    }
+
     suspend fun deleteChapters(chapterIds: List<Int>) {
         suspendTransaction {
             ChapterTable
@@ -828,5 +996,89 @@ object Chapter {
         )
 
         return chapterData.id
+    }
+
+    private data class ChapterHidingRules(
+        val hideBelowOne: Boolean = false,
+        val hideFractional: Boolean = false,
+        val hideHalf: Boolean = false,
+        val showOrphanFractional: Boolean = false,
+        val hiddenNumbers: Set<Float> = emptySet(),
+        val exemptedScanlators: Set<String> = emptySet(),
+        val hiddenChapterScanlatorPairs: Set<String> = emptySet(),
+    ) {
+        private fun parentExists(chapterNumber: Float, allChapterNumbers: Set<Float>?): Boolean {
+            if (allChapterNumbers == null) return true
+            val intPart = chapterNumber.toInt().toFloat()
+            return intPart in allChapterNumbers
+        }
+
+        fun shouldHide(chapterNumber: Float, scanlator: String? = null, allChapterNumbers: Set<Float>? = null): Boolean {
+            if (scanlator in exemptedScanlators) return false
+            if (hideBelowOne && chapterNumber < 1f) return true
+            if (hideFractional && chapterNumber % 1f != 0f) {
+                if (showOrphanFractional && !parentExists(chapterNumber, allChapterNumbers)) return false
+                return true
+            }
+            if (hideHalf && chapterNumber % 1f == 0.5f) return true
+            if (chapterNumber in hiddenNumbers) return true
+            val keyNum = if (chapterNumber % 1f == 0f) chapterNumber.toInt().toString() else chapterNumber.toString()
+            val pairKey = "$keyNum:$scanlator"
+            if (pairKey in hiddenChapterScanlatorPairs) return true
+            return false
+        }
+    }
+
+    private fun loadChapterHidingRulesForManga(mangaId: Int): ChapterHidingRules = transaction {
+        val hidingKeys = listOf("hideChaptersBelowOne", "hideFractionalChapters", "hideHalfChapters", "showOrphanFractional", "hiddenChapterNumbers", "hiddenChapterScanlatorException", "hiddenChapterScanlatorPairs")
+        val metaRows = MangaMetaTable
+            .selectAll()
+            .where { (MangaMetaTable.ref eq mangaId) and (MangaMetaTable.key inList hidingKeys) }
+
+        val metas = metaRows.toList()
+        ChapterHidingRules(
+            hideBelowOne = metas.find { it[MangaMetaTable.key] == "hideChaptersBelowOne" }
+                ?.let { it[MangaMetaTable.value].toBoolean() } ?: false,
+            hideFractional = metas.find { it[MangaMetaTable.key] == "hideFractionalChapters" }
+                ?.let { it[MangaMetaTable.value].toBoolean() } ?: false,
+            hideHalf = metas.find { it[MangaMetaTable.key] == "hideHalfChapters" }
+                ?.let { it[MangaMetaTable.value].toBoolean() } ?: false,
+            showOrphanFractional = metas.find { it[MangaMetaTable.key] == "showOrphanFractional" }
+                ?.let { it[MangaMetaTable.value].toBoolean() } ?: false,
+            hiddenNumbers = metas.find { it[MangaMetaTable.key] == "hiddenChapterNumbers" }
+                ?.let { row ->
+                    row[MangaMetaTable.value].split(",")
+                        .mapNotNull { s -> s.trim().toFloatOrNull() }
+                        .toSet()
+                } ?: emptySet(),
+            exemptedScanlators = metas.find { it[MangaMetaTable.key] == "hiddenChapterScanlatorException" }
+                ?.let { row ->
+                    row[MangaMetaTable.value].split(",")
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() }
+                        .toSet()
+                } ?: emptySet(),
+            hiddenChapterScanlatorPairs = metas.find { it[MangaMetaTable.key] == "hiddenChapterScanlatorPairs" }
+                ?.let { row ->
+                    row[MangaMetaTable.value].split(",")
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() }
+                        .map { pair ->
+                            val parts = pair.split(":", limit = 2)
+                            if (parts.size == 2) {
+                                val num = parts[0].toFloatOrNull()
+                                val keyNum = if (num != null && num % 1f == 0f) num.toInt().toString() else parts[0]
+                                "$keyNum:${parts[1]}"
+                            } else pair
+                        }
+                        .toSet()
+                } ?: emptySet(),
+        )
+    }
+
+    private fun List<ChapterDataClass>.filterHidden(mangaId: Int): List<ChapterDataClass> {
+        val rules = loadChapterHidingRulesForManga(mangaId)
+        val numbers = this.map { it.chapterNumber }.toSet()
+        return this.filter { chapter -> !rules.shouldHide(chapter.chapterNumber, chapter.scanlator, numbers) }
     }
 }

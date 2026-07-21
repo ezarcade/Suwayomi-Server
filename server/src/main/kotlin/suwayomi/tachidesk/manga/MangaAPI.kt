@@ -71,6 +71,7 @@ object MangaAPI {
 
             get("{mangaId}/chapters", MangaController.chapterList)
             post("{mangaId}/chapter/batch", MangaController.chapterBatch)
+            post("{mangaId}/chapter/prune-hidden", MangaController.pruneHiddenDownloads)
             get("{mangaId}/chapter/{chapterIndex}", MangaController.chapterRetrieve)
             patch("{mangaId}/chapter/{chapterIndex}", MangaController.chapterModify)
             put("{mangaId}/chapter/{chapterIndex}", MangaController.chapterModify)

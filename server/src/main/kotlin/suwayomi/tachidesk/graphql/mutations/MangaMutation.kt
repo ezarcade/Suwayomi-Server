@@ -24,6 +24,7 @@ import suwayomi.tachidesk.graphql.types.MangaMetaType
 import suwayomi.tachidesk.graphql.types.MangaType
 import suwayomi.tachidesk.graphql.types.MetaInput
 import graphql.schema.DataFetchingEnvironment
+import suwayomi.tachidesk.manga.impl.Chapter
 import suwayomi.tachidesk.manga.impl.ChapterDownloadHelper
 import suwayomi.tachidesk.manga.impl.Library
 import suwayomi.tachidesk.manga.impl.Manga
@@ -472,5 +473,22 @@ class MangaMutation {
         MangaType.clearCacheFor(mangaId, dataFetchingEnvironment)
 
         return MarkLocalDownloadsPayload(clientMutationId, updatedChapters)
+    }
+
+    data class PruneHiddenDownloadsInput(
+        val clientMutationId: String? = null,
+        val mangaId: Int,
+    )
+
+    data class PruneHiddenDownloadsPayload(
+        val clientMutationId: String?,
+        val count: Int,
+    )
+
+    @RequireAuth
+    fun pruneHiddenDownloads(input: PruneHiddenDownloadsInput): PruneHiddenDownloadsPayload {
+        val (clientMutationId, mangaId) = input
+        val count = Chapter.pruneHiddenDownloads(mangaId)
+        return PruneHiddenDownloadsPayload(clientMutationId, count)
     }
 }

@@ -151,6 +151,16 @@
         gap: 8px;
     }
     .scp-confirm-item::before { content: '📥'; font-size: .8rem; }
+    .scp-confirm-item-hidden {
+        padding: 8px 12px;
+        background: #2a2a3f;
+        border-radius: 8px;
+        font-size: .87rem;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .scp-confirm-item-hidden::before { content: '🗑️'; font-size: .8rem; }
 
     .scp-spinner {
         display: inline-block;
@@ -220,14 +230,42 @@
             const priorityEntry = metaList.find(m => m.key === 'scanlatorPriority');
             const scanlatorPriority = priorityEntry ? priorityEntry.value : '';
 
-            renderMainView(mangaId, allScanlators, filteredScanlators, scanlatorPriority);
+            const overrideEntry = metaList.find(m => m.key === 'scanlatorOverride');
+            const scanlatorOverride = overrideEntry ? overrideEntry.value : '';
+
+            const hideBelowOneEntry = metaList.find(m => m.key === 'hideChaptersBelowOne');
+            const hideBelowOne = hideBelowOneEntry ? hideBelowOneEntry.value === 'true' : false;
+
+            const hideFractionalEntry = metaList.find(m => m.key === 'hideFractionalChapters');
+            const hideFractional = hideFractionalEntry ? hideFractionalEntry.value === 'true' : false;
+
+            const hideHalfEntry = metaList.find(m => m.key === 'hideHalfChapters');
+            const hideHalf = hideHalfEntry ? hideHalfEntry.value === 'true' : false;
+
+            const hiddenNumbersEntry = metaList.find(m => m.key === 'hiddenChapterNumbers');
+            const hiddenNumbers = hiddenNumbersEntry ? hiddenNumbersEntry.value : '';
+
+            const hiddenScanlatorExceptionEntry = metaList.find(m => m.key === 'hiddenChapterScanlatorException');
+            const hiddenScanlatorException = hiddenScanlatorExceptionEntry ? hiddenScanlatorExceptionEntry.value : '';
+
+            const showOrphanFractionalEntry = metaList.find(m => m.key === 'showOrphanFractional');
+            const showOrphanFractional = showOrphanFractionalEntry ? showOrphanFractionalEntry.value === 'true' : false;
+
+            const autoDeleteOrphanFractionalEntry = metaList.find(m => m.key === 'autoDeleteOrphanFractional');
+            const autoDeleteOrphanFractional = autoDeleteOrphanFractionalEntry ? autoDeleteOrphanFractionalEntry.value === 'true' : false;
+
+            const hiddenPairsEntry = metaList.find(m => m.key === 'hiddenChapterScanlatorPairs');
+            const hiddenPairs = hiddenPairsEntry ? hiddenPairsEntry.value : '';
+
+            renderMainView(mangaId, allScanlators, filteredScanlators, scanlatorPriority, scanlatorOverride, { hideBelowOne, hideFractional, hideHalf, showOrphanFractional, autoDeleteOrphanFractional, hiddenNumbers, hiddenScanlatorException, hiddenPairs });
         } catch (err) {
             document.getElementById('scp-content').innerHTML =
                 `<span style="color:#f38ba8">Error loading data: ${err.message}</span>`;
         }
     }
 
-    function renderMainView(mangaId, allScanlators, filteredScanlators, scanlatorPriority) {
+    function renderMainView(mangaId, allScanlators, filteredScanlators, scanlatorPriority, scanlatorOverride, hiding) {
+        hiding = hiding || {};
         const content = document.getElementById('scp-content');
         if (!content) return;
 
@@ -248,6 +286,53 @@
             <div class="scp-section-title" style="margin-top:24px;">🎯 Scanlator Priority Override</div>
             <p style="font-size:.82rem;color:#6c7086;margin-bottom:8px;">Comma-separated list of scanlator group names in order of preference. Overrides the default extension settings.</p>
             <input type="text" id="scp-scanlator-priority" class="scp-input" style="width: 100%; box-sizing: border-box; background: #2a2a3f; color: #cdd6f4; border: 1px solid #45475a; border-radius: 8px; padding: 10px 14px; font-family: inherit; font-size: .93rem; margin-bottom: 12px;" placeholder="e.g. Violet Scans, Comix" value="${scanlatorPriority || ''}">
+
+            <div class="scp-section-title" style="margin-top:24px;">🎯 Per-Chapter Scanlator Override</div>
+            <p style="font-size:.82rem;color:#6c7086;margin-bottom:8px;">Force a specific scanlator for a chapter when dedup is on. Format: chapter:scanlator, comma-separated.</p>
+            <input type="text" id="scp-scanlator-override" class="scp-input" style="width: 100%; box-sizing: border-box; background: #2a2a3f; color: #cdd6f4; border: 1px solid #45475a; border-radius: 8px; padding: 10px 14px; font-family: inherit; font-size: .93rem; margin-bottom: 12px;" placeholder="e.g. 47:SomeGroup, 48:AnotherGroup" value="${scanlatorOverride || ''}">
+
+            <div class="scp-section-title" style="margin-top:28px;">🙈 Chapter Hiding</div>
+            <p style="font-size:.82rem;color:#6c7086;margin-bottom:12px;">Auto-hide chapters based on chapter number rules. Hidden chapters are excluded from lists and unread counts.</p>
+
+            <label style="display:flex;align-items:center;gap:10px;padding:6px 0;cursor:pointer;font-size:.9rem;">
+                <input type="checkbox" id="scp-hide-below-one" ${hiding.hideBelowOne ? 'checked' : ''}>
+                Hide chapters below 1 (e.g. Chapter 0, 0.5)
+            </label>
+
+            <label style="display:flex;align-items:center;gap:10px;padding:6px 0;cursor:pointer;font-size:.9rem;">
+                <input type="checkbox" id="scp-hide-fractional" ${hiding.hideFractional ? 'checked' : ''}>
+                Hide in-between chapters (e.g. 23.1, 23.2, 45.4)
+            </label>
+
+            <label style="display:flex;align-items:center;gap:10px;padding:6px 0;cursor:pointer;font-size:.9rem;">
+                <input type="checkbox" id="scp-hide-half" ${hiding.hideHalf ? 'checked' : ''}>
+                Hide half chapters (e.g. 23.5, 33.5)
+            </label>
+
+            <label style="display:flex;align-items:center;gap:10px;padding:6px 0;cursor:pointer;font-size:.9rem;">
+                <input type="checkbox" id="scp-show-orphan-fractional" ${hiding.showOrphanFractional ? 'checked' : ''}>
+                Show orphan fractional chapters when parent is missing
+            </label>
+
+            <label style="display:flex;align-items:center;gap:10px;padding:6px 0;cursor:pointer;font-size:.9rem;">
+                <input type="checkbox" id="scp-auto-delete-orphan-fractional" ${hiding.autoDeleteOrphanFractional ? 'checked' : ''}>
+                Auto-delete orphan fractional downloads when parent arrives
+            </label>
+
+            <div style="margin-top:10px;">
+                <label style="font-size:.82rem;color:#6c7086;display:block;margin-bottom:6px;">Custom chapter numbers to hide (comma-separated):</label>
+                <input type="text" id="scp-hidden-numbers" class="scp-input" style="width:100%;box-sizing:border-box;background:#2a2a3f;color:#cdd6f4;border:1px solid #45475a;border-radius:8px;padding:10px 14px;font-family:inherit;font-size:.93rem;" placeholder="e.g. 0, 0.5, 23.1, 23.2" value="${hiding.hiddenNumbers || ''}">
+            </div>
+
+            <div style="margin-top:12px;">
+                <label style="font-size:.82rem;color:#6c7086;display:block;margin-bottom:6px;">Skip hiding for these scanlators (comma-separated):</label>
+                <input type="text" id="scp-hidden-scanlator-exception" class="scp-input" style="width:100%;box-sizing:border-box;background:#2a2a3f;color:#cdd6f4;border:1px solid #45475a;border-radius:8px;padding:10px 14px;font-family:inherit;font-size:.93rem;" placeholder="e.g. Violet Scans, Comix" value="${hiding.hiddenScanlatorException || ''}">
+            </div>
+
+            <div style="margin-top:12px;">
+                <label style="font-size:.82rem;color:#6c7086;display:block;margin-bottom:6px;">Hide specific chapter:scanlator pairs (comma-separated, e.g. 6.1:BadScans, 23.5:SomeGroup):</label>
+                <input type="text" id="scp-hidden-pairs" class="scp-input" style="width:100%;box-sizing:border-box;background:#2a2a3f;color:#cdd6f4;border:1px solid #45475a;border-radius:8px;padding:10px 14px;font-family:inherit;font-size:.93rem;" placeholder="e.g. 6.1:BadScans, 23.5:SomeGroup" value="${hiding.hiddenPairs || ''}">
+            </div>
 
             <div class="scp-section-title" style="margin-top:28px;">📂 Local Download Scanner</div>
             <p style="font-size:.82rem;color:#6c7086;margin-bottom:12px;">Scans the manga's download folder for chapters that exist on disk but aren't marked as downloaded in the database.</p>
@@ -272,28 +357,48 @@
 
     /* ──────────────────────────── save filters ───────────────────────────── */
 
+    function saveMeta(mangaId, key, value) {
+        return gql(
+            `mutation($input:SetMangaMetaInput!){setMangaMeta(input:$input){meta{key value}}}`,
+            { input: { meta: { mangaId, key, value } } }
+        );
+    }
+
     async function saveFilters(mangaId) {
         const checkboxes = document.querySelectorAll('#scp-scanlator-list input[type=checkbox]:checked');
         const selected = Array.from(checkboxes).map(cb => cb.value);
         const valueJson = JSON.stringify(selected);
 
         const priorityVal = document.getElementById('scp-scanlator-priority')?.value || '';
+        const overrideVal = document.getElementById('scp-scanlator-override')?.value || '';
+
+        const hideBelowOne = document.getElementById('scp-hide-below-one')?.checked ? 'true' : 'false';
+        const hideFractional = document.getElementById('scp-hide-fractional')?.checked ? 'true' : 'false';
+        const hideHalf = document.getElementById('scp-hide-half')?.checked ? 'true' : 'false';
+        const showOrphanFractional = document.getElementById('scp-show-orphan-fractional')?.checked ? 'true' : 'false';
+        const autoDeleteOrphanFractional = document.getElementById('scp-auto-delete-orphan-fractional')?.checked ? 'true' : 'false';
+        const hiddenNumbers = document.getElementById('scp-hidden-numbers')?.value || '';
+        const hiddenScanlatorException = document.getElementById('scp-hidden-scanlator-exception')?.value || '';
+        const hiddenPairs = document.getElementById('scp-hidden-pairs')?.value || '';
 
         const btn = document.getElementById('scp-save-filters');
         if (btn) { btn.disabled = true; btn.textContent = '⏳ Saving…'; }
 
         try {
             await Promise.all([
-                gql(
-                    `mutation($input:SetMangaMetaInput!){setMangaMeta(input:$input){meta{key value}}}`,
-                    { input: { meta: { mangaId, key: 'filteredScanlators', value: valueJson } } }
-                ),
-                gql(
-                    `mutation($input:SetMangaMetaInput!){setMangaMeta(input:$input){meta{key value}}}`,
-                    { input: { meta: { mangaId, key: 'scanlatorPriority', value: priorityVal } } }
-                )
+                saveMeta(mangaId, 'filteredScanlators', valueJson),
+                saveMeta(mangaId, 'scanlatorPriority', priorityVal),
+                saveMeta(mangaId, 'scanlatorOverride', overrideVal),
+                saveMeta(mangaId, 'hideChaptersBelowOne', hideBelowOne),
+                saveMeta(mangaId, 'hideFractionalChapters', hideFractional),
+                saveMeta(mangaId, 'hideHalfChapters', hideHalf),
+                saveMeta(mangaId, 'showOrphanFractional', showOrphanFractional),
+                saveMeta(mangaId, 'autoDeleteOrphanFractional', autoDeleteOrphanFractional),
+                saveMeta(mangaId, 'hiddenChapterNumbers', hiddenNumbers),
+                saveMeta(mangaId, 'hiddenChapterScanlatorException', hiddenScanlatorException),
+                saveMeta(mangaId, 'hiddenChapterScanlatorPairs', hiddenPairs),
             ]);
-            showToast('✅ Saved filter and priority settings! Refresh chapters to see changes.');
+            showToast('✅ Saved settings! Refresh chapters to see changes.');
             removeModal();
         } catch (err) {
             showToast(`❌ Failed to save: ${err.message}`, 5000);
@@ -310,22 +415,29 @@
 
         try {
             const data = await gql(
-                `query($id:Int!){checkLocalDownloads(mangaId:$id){id name scanlator chapterNumber}}`,
+                `query($id:Int!){
+                    checkLocalDownloads(mangaId:$id){id name scanlator chapterNumber}
+                    hiddenDownloadedChapters(mangaId:$id){id name scanlator chapterNumber}
+                }`,
                 { id: mangaId }
             );
-            const chapters = data.checkLocalDownloads || [];
-            renderConfirmDialog(mangaId, chapters);
+            const untracked = data.checkLocalDownloads || [];
+            const hidden = data.hiddenDownloadedChapters || [];
+            renderConfirmDialog(mangaId, untracked, hidden);
         } catch (err) {
             showToast(`❌ Scan failed: ${err.message}`, 5000);
             if (scanBtn) { scanBtn.disabled = false; scanBtn.innerHTML = '🔍 Scan Local Folder'; }
         }
     }
 
-    function renderConfirmDialog(mangaId, chapters) {
+    function renderConfirmDialog(mangaId, untracked, hidden) {
         const content = document.getElementById('scp-content');
         if (!content) return;
 
-        if (chapters.length === 0) {
+        const hasUntracked = untracked.length > 0;
+        const hasHidden = hidden.length > 0;
+
+        if (!hasUntracked && !hasHidden) {
             content.innerHTML = `
                 <h2>✅ All Good!</h2>
                 <p style="color:#a6e3a1;margin-bottom:20px;">No untracked local chapters found. Every downloaded chapter is already marked correctly in the database.</p>
@@ -337,18 +449,41 @@
             return;
         }
 
-        content.innerHTML = `
-            <h2>📋 Confirm Mark as Downloaded</h2>
-            <p style="font-size:.85rem;color:#6c7086;margin-bottom:16px;">
-                The following <strong style="color:#cba6f7">${chapters.length}</strong> chapter(s) were found on disk but are <em>not</em> marked as downloaded in the database. Confirming will update them.
-            </p>
-            <div class="scp-confirm-list">
-                ${chapters.map(c => `<div class="scp-confirm-item">${c.name}${c.scanlator ? ` <span style="color:#6c7086;font-size:.8rem;">[${c.scanlator}]</span>` : ''}</div>`).join('')}
-            </div>
-            <div class="scp-actions" style="margin-top:20px;">
-                <button class="scp-btn scp-btn-success" id="scp-confirm-mark">✅ Confirm & Mark Downloaded</button>
-                <button class="scp-btn scp-btn-secondary" id="scp-back-confirm">← Back</button>
-            </div>`;
+        let html = `<h2>📋 Scan Results</h2>`;
+
+        if (hasUntracked) {
+            html += `
+                <div class="scp-section-title">📥 Found on Disk (${untracked.length})</div>
+                <p style="font-size:.82rem;color:#6c7086;margin-bottom:10px;">
+                    Chapters on disk not marked as downloaded in DB.
+                </p>
+                <div class="scp-confirm-list" style="margin-bottom:18px;">
+                    ${untracked.map(c => `<div class="scp-confirm-item">${c.name}${c.scanlator ? ` <span style="color:#6c7086;font-size:.8rem;">[${c.scanlator}]</span>` : ''}</div>`).join('')}
+                </div>`;
+        }
+
+        if (hasHidden) {
+            html += `
+                <div class="scp-section-title" style="margin-top:16px;">🗑️ Hidden Downloads (${hidden.length})</div>
+                <p style="font-size:.82rem;color:#6c7086;margin-bottom:10px;">
+                    Downloaded chapters hidden by current hiding rules. Prune to free disk space.
+                </p>
+                <div class="scp-confirm-list" style="margin-bottom:18px;">
+                    ${hidden.map(c => `<div class="scp-confirm-item-hidden">${c.name}${c.scanlator ? ` <span style="color:#6c7086;font-size:.8rem;">[${c.scanlator}]</span>` : ''}</div>`).join('')}
+                </div>`;
+        }
+
+        html += `<div class="scp-actions" style="margin-top:16px;">`;
+
+        if (hasUntracked) {
+            html += `<button class="scp-btn scp-btn-success" id="scp-confirm-mark">✅ Mark Downloaded (${untracked.length})</button>`;
+        }
+        if (hasHidden) {
+            html += `<button class="scp-btn scp-btn-warning" id="scp-confirm-prune">🗑️ Prune Hidden (${hidden.length})</button>`;
+        }
+        html += `<button class="scp-btn scp-btn-secondary" id="scp-back-confirm">← Back</button></div>`;
+
+        content.innerHTML = html;
 
         document.getElementById('scp-back-confirm')?.addEventListener('click', () =>
             openModal(mangaId));
@@ -359,13 +494,29 @@
             try {
                 await gql(
                     `mutation($input:MarkLocalDownloadsInput!){markLocalDownloads(input:$input){chapters{id name isDownloaded}}}`,
-                    { input: { mangaId, chapterIds: chapters.map(c => c.id) } }
+                    { input: { mangaId, chapterIds: untracked.map(c => c.id) } }
                 );
-                showToast(`✅ Marked ${chapters.length} chapter(s) as downloaded!`);
+                showToast(`✅ Marked ${untracked.length} chapter(s) as downloaded!`);
                 removeModal();
             } catch (err) {
                 showToast(`❌ Failed to mark: ${err.message}`, 5000);
-                if (btn) { btn.disabled = false; btn.innerHTML = '✅ Confirm & Mark Downloaded'; }
+                if (btn) { btn.disabled = false; btn.innerHTML = `✅ Mark Downloaded (${untracked.length})`; }
+            }
+        });
+
+        document.getElementById('scp-confirm-prune')?.addEventListener('click', async () => {
+            const btn = document.getElementById('scp-confirm-prune');
+            if (btn) { btn.disabled = true; btn.innerHTML = '<span class="scp-spinner"></span>Pruning…'; }
+            try {
+                const data = await gql(
+                    `mutation($input:PruneHiddenDownloadsInput!){pruneHiddenDownloads(input:$input){count}}`,
+                    { input: { mangaId } }
+                );
+                showToast(`🗑️ Deleted ${data.pruneHiddenDownloads.count} hidden download(s)!`);
+                removeModal();
+            } catch (err) {
+                showToast(`❌ Failed to prune: ${err.message}`, 5000);
+                if (btn) { btn.disabled = false; btn.innerHTML = `🗑️ Prune Hidden (${hidden.length})`; }
             }
         });
     }

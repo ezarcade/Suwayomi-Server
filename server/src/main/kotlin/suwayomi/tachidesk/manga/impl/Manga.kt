@@ -36,6 +36,7 @@ import org.jetbrains.exposed.v1.core.eq
 import org.jetbrains.exposed.v1.core.inList
 import org.jetbrains.exposed.v1.core.statements.BatchUpdateStatement
 import org.jetbrains.exposed.v1.jdbc.batchInsert
+import org.jetbrains.exposed.v1.jdbc.select
 import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.statements.toExecutable
 import org.jetbrains.exposed.v1.jdbc.transactions.suspendTransaction
@@ -100,6 +101,15 @@ object Manga {
         val mangaId = mangaEntry[MangaTable.id].value
         val metaMap = getMangaMetaMap(mangaId)
         val scanlatorPriority = metaMap["scanlatorPriority"]
+        val scanlatorOverride = metaMap["scanlatorOverride"]
+
+        val priorityTag = if (scanlatorOverride != null) {
+            val overridePairs = scanlatorOverride.split(",").joinToString(",")
+            val fallback = scanlatorPriority ?: ""
+            "?$overridePairs|$fallback"
+        } else {
+            scanlatorPriority
+        }
 
         val sManga =
             SManga.create().apply {
@@ -108,10 +118,9 @@ object Manga {
                 thumbnail_url = mangaEntry[MangaTable.thumbnail_url]
                 artist = mangaEntry[MangaTable.artist]
                 author = mangaEntry[MangaTable.author]
-                description = if (scanlatorPriority != null) {
-                    "${mangaEntry[MangaTable.description] ?: ""} ||suwayomi_meta:scanlatorPriority=$scanlatorPriority||"
-                } else {
-                    mangaEntry[MangaTable.description]
+                description = buildString {
+                    append(mangaEntry[MangaTable.description] ?: "")
+                    if (priorityTag != null) append(" ||suwayomi_meta:scanlatorPriority=$priorityTag||")
                 }
                 genre = mangaEntry[MangaTable.genre]
                 status = mangaEntry[MangaTable.status]
@@ -137,12 +146,17 @@ object Manga {
                     }
             }
 
-        return source.getMangaUpdate(
+        val result = source.getMangaUpdate(
             sManga,
             sChapters,
             fetchDetails = fetchDetails,
             fetchChapters = fetchChapters,
         )
+        // append tag to the returned manga description (after getMangaUpdate which may have overwritten it)
+        if (priorityTag != null) {
+            result.manga.description = (result.manga.description ?: "") + " ||suwayomi_meta:scanlatorPriority=$priorityTag||"
+        }
+        return result
     }
 
     suspend fun fetchManga(mangaId: Int): SManga? {
@@ -504,6 +518,16 @@ object Manga {
             }
         } ?: emptyList()
 
+        val hidingRules = loadChapterHidingRulesForManga(mangaId)
+
+        val allChapterNumbers = transaction {
+            ChapterTable
+                .select(ChapterTable.chapter_number)
+                .where { ChapterTable.manga eq mangaId }
+                .map { it[ChapterTable.chapter_number] }
+                .toSet()
+        }
+
         return transaction {
             ChapterTable
                 .selectAll()
@@ -511,7 +535,85 @@ object Manga {
                 .orderBy(ChapterTable.sourceOrder to SortOrder.DESC)
                 .map { ChapterTable.toDataClass(it) }
         }.filter { chapter ->
-            filteredScanlators.isEmpty() || chapter.scanlator !in filteredScanlators
+            val scanlatorOk = filteredScanlators.isEmpty() || chapter.scanlator !in filteredScanlators
+            scanlatorOk && !hidingRules.shouldHide(chapter.chapterNumber, chapter.scanlator, allChapterNumbers)
+        }
+    }
+
+    private fun loadChapterHidingRulesForManga(mangaId: Int): ChapterHidingRules = transaction {
+        val hidingKeys = listOf("hideChaptersBelowOne", "hideFractionalChapters", "hideHalfChapters", "showOrphanFractional", "hiddenChapterNumbers", "hiddenChapterScanlatorException", "hiddenChapterScanlatorPairs")
+        val metas = MangaMetaTable
+            .selectAll()
+            .where { (MangaMetaTable.ref eq mangaId) and (MangaMetaTable.key inList hidingKeys) }
+            .toList()
+        ChapterHidingRules(
+            hideBelowOne = metas.find { it[MangaMetaTable.key] == "hideChaptersBelowOne" }
+                ?.let { it[MangaMetaTable.value].toBoolean() } ?: false,
+            hideFractional = metas.find { it[MangaMetaTable.key] == "hideFractionalChapters" }
+                ?.let { it[MangaMetaTable.value].toBoolean() } ?: false,
+            hideHalf = metas.find { it[MangaMetaTable.key] == "hideHalfChapters" }
+                ?.let { it[MangaMetaTable.value].toBoolean() } ?: false,
+            showOrphanFractional = metas.find { it[MangaMetaTable.key] == "showOrphanFractional" }
+                ?.let { it[MangaMetaTable.value].toBoolean() } ?: false,
+            hiddenNumbers = metas.find { it[MangaMetaTable.key] == "hiddenChapterNumbers" }
+                ?.let { row ->
+                    row[MangaMetaTable.value].split(",")
+                        .mapNotNull { s -> s.trim().toFloatOrNull() }
+                        .toSet()
+                } ?: emptySet(),
+            exemptedScanlators = metas.find { it[MangaMetaTable.key] == "hiddenChapterScanlatorException" }
+                ?.let { row ->
+                    row[MangaMetaTable.value].split(",")
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() }
+                        .toSet()
+                } ?: emptySet(),
+            hiddenChapterScanlatorPairs = metas.find { it[MangaMetaTable.key] == "hiddenChapterScanlatorPairs" }
+                ?.let { row ->
+                    row[MangaMetaTable.value].split(",")
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() }
+                        .map { pair ->
+                            val parts = pair.split(":", limit = 2)
+                            if (parts.size == 2) {
+                                val num = parts[0].toFloatOrNull()
+                                val keyNum = if (num != null && num % 1f == 0f) num.toInt().toString() else parts[0]
+                                "$keyNum:${parts[1]}"
+                            } else pair
+                        }
+                        .toSet()
+                } ?: emptySet(),
+        )
+    }
+
+    private data class ChapterHidingRules(
+        val hideBelowOne: Boolean = false,
+        val hideFractional: Boolean = false,
+        val hideHalf: Boolean = false,
+        val showOrphanFractional: Boolean = false,
+        val hiddenNumbers: Set<Float> = emptySet(),
+        val exemptedScanlators: Set<String> = emptySet(),
+        val hiddenChapterScanlatorPairs: Set<String> = emptySet(),
+    ) {
+        private fun parentExists(chapterNumber: Float, allChapterNumbers: Set<Float>?): Boolean {
+            if (allChapterNumbers == null) return true
+            val intPart = chapterNumber.toInt().toFloat()
+            return intPart in allChapterNumbers
+        }
+
+        fun shouldHide(chapterNumber: Float, scanlator: String? = null, allChapterNumbers: Set<Float>? = null): Boolean {
+            if (scanlator in exemptedScanlators) return false
+            if (hideBelowOne && chapterNumber < 1f) return true
+            if (hideFractional && chapterNumber % 1f != 0f) {
+                if (showOrphanFractional && !parentExists(chapterNumber, allChapterNumbers)) return false
+                return true
+            }
+            if (hideHalf && chapterNumber % 1f == 0.5f) return true
+            if (chapterNumber in hiddenNumbers) return true
+            val keyNum = if (chapterNumber % 1f == 0f) chapterNumber.toInt().toString() else chapterNumber.toString()
+            val pairKey = "$keyNum:$scanlator"
+            if (pairKey in hiddenChapterScanlatorPairs) return true
+            return false
         }
     }
 

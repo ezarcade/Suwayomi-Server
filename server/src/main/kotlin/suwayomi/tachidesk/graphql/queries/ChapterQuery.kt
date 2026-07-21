@@ -10,14 +10,21 @@ package suwayomi.tachidesk.graphql.queries
 import com.expediagroup.graphql.generator.annotations.GraphQLDeprecated
 import com.expediagroup.graphql.server.extensions.getValueFromDataLoader
 import graphql.schema.DataFetchingEnvironment
+import kotlinx.serialization.json.Json
 import org.jetbrains.exposed.v1.core.Column
 import org.jetbrains.exposed.v1.core.Op
 import org.jetbrains.exposed.v1.core.SortOrder
+import org.jetbrains.exposed.v1.core.and
+import org.jetbrains.exposed.v1.core.eq
 import org.jetbrains.exposed.v1.core.greater
+import org.jetbrains.exposed.v1.core.inList
 import org.jetbrains.exposed.v1.core.less
 import org.jetbrains.exposed.v1.jdbc.andWhere
+import org.jetbrains.exposed.v1.jdbc.select
 import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import suwayomi.tachidesk.graphql.dataLoaders.ChapterHidingRules
+import suwayomi.tachidesk.graphql.dataLoaders.loadChapterHidingRules
 import suwayomi.tachidesk.graphql.directives.RequireAuth
 import suwayomi.tachidesk.graphql.queries.filter.BooleanFilter
 import suwayomi.tachidesk.graphql.queries.filter.DoubleFilter
@@ -43,6 +50,7 @@ import suwayomi.tachidesk.graphql.server.primitives.lessNotUnique
 import suwayomi.tachidesk.graphql.types.ChapterNodeList
 import suwayomi.tachidesk.graphql.types.ChapterType
 import suwayomi.tachidesk.manga.model.table.ChapterTable
+import suwayomi.tachidesk.manga.model.table.MangaMetaTable
 import suwayomi.tachidesk.manga.model.table.MangaTable
 import java.util.concurrent.CompletableFuture
 
@@ -259,19 +267,50 @@ class ChapterQuery {
 
         val resultsAsType = queryResults.results.map { ChapterType(it) }
 
+        val mangaId = condition?.mangaId ?: filter?.mangaId?.let { it.equalTo ?: it.`in`?.singleOrNull() }
+        val filteredResults = if (mangaId != null) {
+            val filteredScanlators = try {
+                transaction {
+                    MangaMetaTable.selectAll()
+                        .where { (MangaMetaTable.ref eq mangaId) and (MangaMetaTable.key eq "filteredScanlators") }
+                        .firstOrNull()
+                        ?.let { Json.decodeFromString<List<String>>(it[MangaMetaTable.value]) }
+                } ?: emptyList()
+            } catch (e: Exception) {
+                emptyList()
+            }
+
+            val hidingRules = loadChapterHidingRules(listOf(mangaId))[mangaId] ?: ChapterHidingRules()
+
+            val allChapterNumbers = transaction {
+                ChapterTable
+                    .select(ChapterTable.chapter_number)
+                    .where { ChapterTable.manga eq mangaId }
+                    .map { it[ChapterTable.chapter_number] }
+                    .toSet()
+            }
+
+            resultsAsType.filter { chapter ->
+                val scanlatorOk = filteredScanlators.isEmpty() || chapter.scanlator !in filteredScanlators
+                scanlatorOk && !hidingRules.shouldHide(chapter.chapterNumber, chapter.scanlator, allChapterNumbers)
+            }
+        } else {
+            resultsAsType
+        }
+
         return ChapterNodeList(
-            resultsAsType,
-            if (resultsAsType.isEmpty()) {
+            filteredResults,
+            if (filteredResults.isEmpty()) {
                 emptyList()
             } else {
                 listOfNotNull(
-                    resultsAsType.firstOrNull()?.let {
+                    filteredResults.firstOrNull()?.let {
                         ChapterNodeList.ChapterEdge(
                             getAsCursor(it),
                             it,
                         )
                     },
-                    resultsAsType.lastOrNull()?.let {
+                    filteredResults.lastOrNull()?.let {
                         ChapterNodeList.ChapterEdge(
                             getAsCursor(it),
                             it,
@@ -281,12 +320,12 @@ class ChapterQuery {
             },
             pageInfo =
                 PageInfo(
-                    hasNextPage = queryResults.lastKey != resultsAsType.lastOrNull()?.id,
-                    hasPreviousPage = queryResults.firstKey != resultsAsType.firstOrNull()?.id,
-                    startCursor = resultsAsType.firstOrNull()?.let { getAsCursor(it) },
-                    endCursor = resultsAsType.lastOrNull()?.let { getAsCursor(it) },
+                    hasNextPage = queryResults.lastKey != filteredResults.lastOrNull()?.id,
+                    hasPreviousPage = queryResults.firstKey != filteredResults.firstOrNull()?.id,
+                    startCursor = filteredResults.firstOrNull()?.let { getAsCursor(it) },
+                    endCursor = filteredResults.lastOrNull()?.let { getAsCursor(it) },
                 ),
-            totalCount = queryResults.total.toInt(),
+            totalCount = filteredResults.size,
         )
     }
 }

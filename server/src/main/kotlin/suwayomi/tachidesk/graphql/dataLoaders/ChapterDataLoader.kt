@@ -70,16 +70,28 @@ class ChaptersForMangaDataLoader : KotlinDataLoader<Int, ChapterNodeList> {
                             }
                         }
 
-                    val chaptersByMangaId =
+                    val chapterHidingRulesByManga = loadChapterHidingRules(ids)
+
+                    val allChapterTypes =
                         ChapterTable
                             .selectAll()
                             .where { ChapterTable.manga inList ids }
                             .map { ChapterType(it) }
-                            .filter {
-                                val filtered = filteredScanlatorsByManga[it.mangaId] ?: emptyList()
-                                it.scanlator !in filtered
+
+                    val chapterNumbersByManga = allChapterTypes
+                        .groupBy { it.mangaId }
+                        .mapValues { (_, chapters) -> chapters.map { it.chapterNumber }.toSet() }
+
+                    val chaptersByMangaId = allChapterTypes
+                        .groupBy { it.mangaId }
+                        .mapValues { (mangaId, chapters) ->
+                            val filtered = filteredScanlatorsByManga[mangaId] ?: emptyList()
+                            val rules = chapterHidingRulesByManga[mangaId] ?: ChapterHidingRules()
+                            val numbers = chapterNumbersByManga[mangaId] ?: emptySet()
+                            chapters.filter { chapter ->
+                                (chapter.scanlator !in filtered) && !rules.shouldHide(chapter.chapterNumber, chapter.scanlator, numbers)
                             }
-                            .groupBy { it.mangaId }
+                        }
                     ids.map { (chaptersByMangaId[it] ?: emptyList()).toNodeList() }
                 }
             }
@@ -128,6 +140,14 @@ class UnreadChapterCountForMangaDataLoader : KotlinDataLoader<Int, Int> {
                             }
                         }
 
+                    val chapterHidingRulesByManga = loadChapterHidingRules(ids)
+
+                    val allChapterNumbersByManga = ChapterTable
+                        .select(ChapterTable.manga, ChapterTable.chapter_number)
+                        .where { ChapterTable.manga inList ids }
+                        .groupBy { it[ChapterTable.manga].value }
+                        .mapValues { (_, rows) -> rows.map { it[ChapterTable.chapter_number] }.toSet() }
+
                     val unreadChapters =
                         ChapterTable
                             .selectAll()
@@ -135,7 +155,9 @@ class UnreadChapterCountForMangaDataLoader : KotlinDataLoader<Int, Int> {
                             .filter {
                                 val mangaId = it[ChapterTable.manga].value
                                 val filtered = filteredScanlatorsByManga[mangaId] ?: emptyList()
-                                it[ChapterTable.scanlator] !in filtered
+                                val rules = chapterHidingRulesByManga[mangaId] ?: ChapterHidingRules()
+                                val numbers = allChapterNumbersByManga[mangaId] ?: emptySet()
+                                (it[ChapterTable.scanlator] !in filtered) && !rules.shouldHide(it[ChapterTable.chapter_number], it[ChapterTable.scanlator], numbers)
                             }
                             .groupBy { it[ChapterTable.manga].value }
                     ids.map { unreadChapters[it]?.size ?: 0 }
@@ -293,6 +315,14 @@ class FirstUnreadChapterForMangaDataLoader : KotlinDataLoader<Int, ChapterType> 
                             }
                         }
 
+                    val chapterHidingRulesByManga = loadChapterHidingRules(ids)
+
+                    val allChapterNumbersByManga = ChapterTable
+                        .select(ChapterTable.manga, ChapterTable.chapter_number)
+                        .where { ChapterTable.manga inList ids }
+                        .groupBy { it[ChapterTable.manga].value }
+                        .mapValues { (_, rows) -> rows.map { it[ChapterTable.chapter_number] }.toSet() }
+
                     val firstUnreadChaptersByMangaId =
                         ChapterTable
                             .selectAll()
@@ -301,7 +331,9 @@ class FirstUnreadChapterForMangaDataLoader : KotlinDataLoader<Int, ChapterType> 
                             .filter {
                                 val mangaId = it[ChapterTable.manga].value
                                 val filtered = filteredScanlatorsByManga[mangaId] ?: emptyList()
-                                it[ChapterTable.scanlator] !in filtered
+                                val rules = chapterHidingRulesByManga[mangaId] ?: ChapterHidingRules()
+                                val numbers = allChapterNumbersByManga[mangaId] ?: emptySet()
+                                (it[ChapterTable.scanlator] !in filtered) && !rules.shouldHide(it[ChapterTable.chapter_number], it[ChapterTable.scanlator], numbers)
                             }
                             .groupBy { it[ChapterTable.manga].value }
                     ids.map { id -> firstUnreadChaptersByMangaId[id]?.let { chapters -> ChapterType(chapters.first()) } }
@@ -332,4 +364,86 @@ class HighestNumberedChapterForMangaDataLoader : KotlinDataLoader<Int, ChapterTy
                 }
             }
         }
+}
+
+data class ChapterHidingRules(
+    val hideBelowOne: Boolean = false,
+    val hideFractional: Boolean = false,
+    val hideHalf: Boolean = false,
+    val showOrphanFractional: Boolean = false,
+    val hiddenNumbers: Set<Float> = emptySet(),
+    val exemptedScanlators: Set<String> = emptySet(),
+    val hiddenChapterScanlatorPairs: Set<String> = emptySet(),
+) {
+    private fun parentExists(chapterNumber: Float, allChapterNumbers: Set<Float>?): Boolean {
+        if (allChapterNumbers == null) return true
+        val intPart = chapterNumber.toInt().toFloat()
+        return intPart in allChapterNumbers
+    }
+
+    fun shouldHide(chapterNumber: Float, scanlator: String? = null, allChapterNumbers: Set<Float>? = null): Boolean {
+        if (scanlator in exemptedScanlators) return false
+        if (hideBelowOne && chapterNumber < 1f) return true
+        if (hideFractional && chapterNumber % 1f != 0f) {
+            if (showOrphanFractional && !parentExists(chapterNumber, allChapterNumbers)) return false
+            return true
+        }
+        if (hideHalf && chapterNumber % 1f == 0.5f) return true
+        if (chapterNumber in hiddenNumbers) return true
+        val keyNum = if (chapterNumber % 1f == 0f) chapterNumber.toInt().toString() else chapterNumber.toString()
+        val pairKey = "$keyNum:$scanlator"
+        if (pairKey in hiddenChapterScanlatorPairs) return true
+        return false
+    }
+}
+
+fun loadChapterHidingRules(ids: List<Int>): Map<Int, ChapterHidingRules> = transaction {
+    val hidingKeys = listOf("hideChaptersBelowOne", "hideFractionalChapters", "hideHalfChapters", "showOrphanFractional", "hiddenChapterNumbers", "hiddenChapterScanlatorException", "hiddenChapterScanlatorPairs")
+    val metaRows = MangaMetaTable
+        .selectAll()
+        .where { (MangaMetaTable.ref inList ids) and (MangaMetaTable.key inList hidingKeys) }
+
+    val metaByManga = metaRows.groupBy { it[MangaMetaTable.ref].value }
+
+    ids.associateWith { mangaId ->
+        val metas = metaByManga[mangaId] ?: emptyList()
+        ChapterHidingRules(
+            hideBelowOne = metas.find { it[MangaMetaTable.key] == "hideChaptersBelowOne" }
+                ?.let { it[MangaMetaTable.value].toBoolean() } ?: false,
+            hideFractional = metas.find { it[MangaMetaTable.key] == "hideFractionalChapters" }
+                ?.let { it[MangaMetaTable.value].toBoolean() } ?: false,
+            hideHalf = metas.find { it[MangaMetaTable.key] == "hideHalfChapters" }
+                ?.let { it[MangaMetaTable.value].toBoolean() } ?: false,
+            showOrphanFractional = metas.find { it[MangaMetaTable.key] == "showOrphanFractional" }
+                ?.let { it[MangaMetaTable.value].toBoolean() } ?: false,
+            hiddenNumbers = metas.find { it[MangaMetaTable.key] == "hiddenChapterNumbers" }
+                ?.let { row ->
+                    row[MangaMetaTable.value].split(",")
+                        .mapNotNull { s -> s.trim().toFloatOrNull() }
+                        .toSet()
+                } ?: emptySet(),
+            exemptedScanlators = metas.find { it[MangaMetaTable.key] == "hiddenChapterScanlatorException" }
+                ?.let { row ->
+                    row[MangaMetaTable.value].split(",")
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() }
+                        .toSet()
+                } ?: emptySet(),
+            hiddenChapterScanlatorPairs = metas.find { it[MangaMetaTable.key] == "hiddenChapterScanlatorPairs" }
+                ?.let { row ->
+                    row[MangaMetaTable.value].split(",")
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() }
+                        .map { pair ->
+                            val parts = pair.split(":", limit = 2)
+                            if (parts.size == 2) {
+                                val num = parts[0].toFloatOrNull()
+                                val keyNum = if (num != null && num % 1f == 0f) num.toInt().toString() else parts[0]
+                                "$keyNum:${parts[1]}"
+                            } else pair
+                        }
+                        .toSet()
+                } ?: emptySet(),
+        )
+    }
 }

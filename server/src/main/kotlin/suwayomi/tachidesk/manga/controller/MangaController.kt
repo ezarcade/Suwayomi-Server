@@ -437,6 +437,27 @@ object MangaController {
             },
         )
 
+    /** delete downloads of chapters hidden by current hiding rules */
+    val pruneHiddenDownloads =
+        handler(
+            pathParam<Int>("mangaId"),
+            documentWith = {
+                withOperation {
+                    summary("Delete downloads of hidden chapters")
+                    description("Removes downloaded files for chapters that would be hidden by current hiding rules. Does not delete DB records.")
+                }
+            },
+            behaviorOf = { ctx, mangaId ->
+                ctx.getAttribute(Attribute.TachideskUser).requireUser()
+                val count = Chapter.pruneHiddenDownloads(mangaId)
+                ctx.json(mapOf("deletedFileCount" to count))
+            },
+            withResults = {
+                httpCode(HttpStatus.OK)
+                httpCode(HttpStatus.NOT_FOUND)
+            },
+        )
+
     /** used to modify a chapter's meta parameters */
     val chapterMeta =
         handler(

@@ -57,6 +57,7 @@ import suwayomi.tachidesk.graphql.types.ChapterType
 import suwayomi.tachidesk.manga.impl.util.getChapterDownloadPath
 import suwayomi.tachidesk.manga.impl.util.getChapterCbzPath
 import java.io.File
+import suwayomi.tachidesk.manga.impl.Chapter
 import java.util.concurrent.CompletableFuture
 
 class MangaQuery {
@@ -360,5 +361,12 @@ class MangaQuery {
                 folder.exists() || cbz.exists()
             }.map { ChapterType(it) }
         }
+    }
+
+    @RequireAuth
+    fun hiddenDownloadedChapters(
+        mangaId: Int
+    ): List<ChapterType> {
+        return Chapter.getHiddenDownloadedChapters(mangaId).map { ChapterType(it) }
     }
 }
