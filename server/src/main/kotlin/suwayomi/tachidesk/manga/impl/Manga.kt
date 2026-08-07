@@ -24,6 +24,8 @@ import io.github.reactivecircus.cache4k.Cache
 import io.javalin.http.HttpStatus
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import okhttp3.CacheControl
 import okhttp3.Response
 import org.jetbrains.exposed.v1.core.ResultRow
@@ -36,6 +38,7 @@ import org.jetbrains.exposed.v1.core.statements.BatchUpdateStatement
 import org.jetbrains.exposed.v1.jdbc.batchInsert
 import org.jetbrains.exposed.v1.jdbc.selectAll
 import org.jetbrains.exposed.v1.jdbc.statements.toExecutable
+import org.jetbrains.exposed.v1.jdbc.transactions.suspendTransaction
 import org.jetbrains.exposed.v1.jdbc.transactions.transaction
 import org.jetbrains.exposed.v1.jdbc.update
 import suwayomi.tachidesk.manga.impl.download.fileProvider.impl.MissingThumbnailException
@@ -56,7 +59,6 @@ import suwayomi.tachidesk.manga.model.table.MangaTable
 import suwayomi.tachidesk.manga.model.table.toDataClass
 import suwayomi.tachidesk.server.ApplicationDirs
 import uy.kohesive.injekt.injectLazy
-import kotlinx.serialization.json.Json
 import java.io.File
 import java.io.IOException
 import java.io.InputStream
@@ -114,7 +116,7 @@ object Manga {
                 genre = mangaEntry[MangaTable.genre]
                 status = mangaEntry[MangaTable.status]
                 update_strategy = UpdateStrategy.valueOf(mangaEntry[MangaTable.updateStrategy])
-                memo = Json.decodeFromString(mangaEntry[MangaTable.memo])
+                memo = mangaEntry[MangaTable.memo]
                 initialized = mangaEntry[MangaTable.initialized]
             }
         val sChapters =
@@ -130,7 +132,7 @@ object Manga {
                             chapter_number = it[ChapterTable.chapter_number]
                             scanlator = it[ChapterTable.scanlator]
                             date_upload = it[ChapterTable.date_upload]
-                            memo = Json.decodeFromString(it[ChapterTable.memo])
+                            memo = it[ChapterTable.memo]
                         }
                     }
             }
@@ -192,25 +194,29 @@ object Manga {
         }
     }
 
-    fun updateMangaDatabase(
+    suspend fun updateMangaDatabase(
         mangaEntry: ResultRow,
         source: Source,
         sManga: SManga,
     ): SManga {
-        transaction {
-            MangaTable.update({ MangaTable.id eq mangaEntry[MangaTable.id] }) {
-                val remoteTitle =
-                    try {
-                        sManga.title
-                    } catch (_: UninitializedPropertyAccessException) {
-                        ""
-                    }
-                if (remoteTitle.isNotEmpty() && remoteTitle != mangaEntry[MangaTable.title]) {
-                    val canUpdateTitle = updateMangaDownloadDir(mangaEntry[MangaTable.title], source.toString(), remoteTitle)
+        suspendTransaction {
+            val mangaId = mangaEntry[MangaTable.id].value
+            val currentTitle = mangaEntry[MangaTable.title]
+            val remoteTitle =
+                try {
+                    sManga.title
+                } catch (_: UninitializedPropertyAccessException) {
+                    ""
+                }
 
-                    if (canUpdateTitle) {
-                        it[MangaTable.title] = remoteTitle
-                    }
+            val hasChangedTitle = remoteTitle.isNotEmpty() && remoteTitle != currentTitle
+            val canUpdateTitle =
+                hasChangedTitle &&
+                    updateMangaDownloadDir(mangaId, currentTitle, source.toString(), remoteTitle)
+
+            MangaTable.update({ MangaTable.id eq mangaEntry[MangaTable.id] }) {
+                if (canUpdateTitle) {
+                    it[MangaTable.title] = remoteTitle
                 }
                 it[MangaTable.initialized] = true
 
@@ -223,7 +229,7 @@ object Manga {
                 if (!sManga.thumbnail_url.isNullOrEmpty()) {
                     it[MangaTable.thumbnail_url] = sManga.thumbnail_url
                     it[MangaTable.thumbnailUrlLastFetched] = Instant.now().epochSecond
-                    clearThumbnail(mangaEntry[MangaTable.id].value)
+                    clearThumbnail(mangaId)
                 }
 
                 it[MangaTable.realUrl] =
@@ -231,7 +237,7 @@ object Manga {
                         (source as? HttpSource)?.getMangaUrl(
                             SManga.create().apply {
                                 url = mangaEntry[MangaTable.url]
-                                title = remoteTitle.ifEmpty { mangaEntry[MangaTable.title] }
+                                title = remoteTitle.ifEmpty { currentTitle }
                                 thumbnail_url = mangaEntry[MangaTable.thumbnail_url]
                                 artist = sManga.artist ?: mangaEntry[MangaTable.artist]
                                 author = sManga.author ?: mangaEntry[MangaTable.author]
@@ -246,7 +252,7 @@ object Manga {
                 it[MangaTable.lastFetchedAt] = Instant.now().epochSecond
 
                 it[MangaTable.updateStrategy] = sManga.update_strategy.name
-                it[MangaTable.memo] = Json.encodeToString(sManga.memo)
+                it[MangaTable.memo] = sManga.memo
             }
         }
 

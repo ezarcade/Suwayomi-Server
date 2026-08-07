@@ -37,9 +37,9 @@ import suwayomi.tachidesk.graphql.server.primitives.OrderBy
 import suwayomi.tachidesk.graphql.server.primitives.PageInfo
 import suwayomi.tachidesk.graphql.server.primitives.QueryResults
 import suwayomi.tachidesk.graphql.server.primitives.applyBeforeAfter
+import suwayomi.tachidesk.graphql.server.primitives.applySortAndGetPaginationInfo
 import suwayomi.tachidesk.graphql.server.primitives.greaterNotUnique
 import suwayomi.tachidesk.graphql.server.primitives.lessNotUnique
-import suwayomi.tachidesk.graphql.server.primitives.maybeSwap
 import suwayomi.tachidesk.graphql.types.ChapterNodeList
 import suwayomi.tachidesk.graphql.types.ChapterType
 import suwayomi.tachidesk.manga.model.table.ChapterTable
@@ -233,21 +233,11 @@ class ChapterQuery {
 
                 res.applyOps(condition, filter)
 
-                if (order != null || orderBy != null || (last != null || before != null)) {
-                    val baseSort = listOf(ChapterOrder(ChapterOrderBy.ID, SortOrder.ASC))
-                    val deprecatedSort = listOfNotNull(orderBy?.let { ChapterOrder(orderBy, orderByType) })
-                    val actualSort = (order.orEmpty() + deprecatedSort + baseSort)
-                    actualSort.forEach { (orderBy, orderByType) ->
-                        val orderByColumn = orderBy.column
-                        val orderType = orderByType.maybeSwap(last ?: before)
+                val baseSort = listOf(ChapterOrder(ChapterOrderBy.ID, SortOrder.ASC))
+                val deprecatedSort = listOfNotNull(orderBy?.let { ChapterOrder(orderBy, orderByType) })
+                val actualSort = (order.orEmpty() + deprecatedSort + baseSort)
 
-                        res.orderBy(orderByColumn to orderType)
-                    }
-                }
-
-                val total = res.count()
-                val firstResult = res.firstOrNull()?.get(ChapterTable.id)?.value
-                val lastResult = res.lastOrNull()?.get(ChapterTable.id)?.value
+                val (total, firstResult, lastResult) = res.applySortAndGetPaginationInfo(actualSort, before, last, ChapterTable.id)
 
                 res.applyBeforeAfter(
                     before = before,

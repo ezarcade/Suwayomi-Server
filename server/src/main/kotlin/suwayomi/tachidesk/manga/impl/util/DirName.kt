@@ -7,18 +7,24 @@ package suwayomi.tachidesk.manga.impl.util
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
+import eu.kanade.tachiyomi.util.lang.withIOContext
 import io.github.oshai.kotlinlogging.KotlinLogging
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.jetbrains.exposed.v1.core.eq
 import org.jetbrains.exposed.v1.jdbc.selectAll
-import org.jetbrains.exposed.v1.jdbc.transactions.transaction
+import org.jetbrains.exposed.v1.jdbc.transactions.suspendTransaction
 import suwayomi.tachidesk.manga.impl.util.source.GetSource
+import suwayomi.tachidesk.manga.model.dataclass.ChapterDataClass
 import suwayomi.tachidesk.manga.model.table.ChapterTable
 import suwayomi.tachidesk.manga.model.table.MangaTable
 import suwayomi.tachidesk.server.ApplicationDirs
 import uy.kohesive.injekt.injectLazy
 import xyz.nulldev.androidcompat.util.SafePath
-import java.io.File
-import java.nio.file.Files
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.io.path.Path
+import kotlin.io.path.moveTo
+import kotlin.io.path.notExists
 
 private val applicationDirs: ApplicationDirs by injectLazy()
 
@@ -34,38 +40,40 @@ private fun getMangaDir(
     return "$sourceDir/$mangaDir"
 }
 
-private fun getMangaDir(mangaId: Int): String =
-    transaction {
+private suspend fun getMangaDir(mangaId: Int): String =
+    suspendTransaction {
         val mangaEntry = MangaTable.selectAll().where { MangaTable.id eq mangaId }.first()
         val source = GetSource.getSourceOrStub(mangaEntry[MangaTable.sourceReference])
 
         getMangaDir(mangaEntry[MangaTable.title], source.toString())
     }
 
-private fun getChapterDir(
+private suspend fun getChapterDir(
+    mangaId: Int,
+    title: String,
+    scanlator: String?,
+): String {
+    val chapterDir =
+        SafePath.buildValidFilename(
+            when {
+                scanlator != null -> "${scanlator}_$title"
+                else -> title
+            },
+        )
+
+    return getMangaDir(mangaId) + "/" + chapterDir
+}
+
+private suspend fun getChapterDir(
     mangaId: Int,
     chapterId: Int,
 ): String =
-    transaction {
-        // Get chapter data and build chapter-specific directory name
+    suspendTransaction {
         val chapterEntry = ChapterTable.selectAll().where { ChapterTable.id eq chapterId }.first()
-
-        val chapterDir =
-            SafePath.buildValidFilename(
-                when {
-                    chapterEntry[ChapterTable.scanlator] != null -> {
-                        "${chapterEntry[ChapterTable.scanlator]}_${chapterEntry[ChapterTable.name]}"
-                    }
-
-                    else -> {
-                        chapterEntry[ChapterTable.name]
-                    }
-                },
-            )
 
         // Get manga directory and combine with chapter directory
         // Note: This creates a nested transaction, but Exposed handles this with useNestedTransactions=true
-        getMangaDir(mangaId) + "/$chapterDir"
+        getChapterDir(mangaId, chapterEntry[ChapterTable.name], chapterEntry[ChapterTable.scanlator])
     }
 
 fun getThumbnailDownloadPath(mangaId: Int): String = applicationDirs.thumbnailDownloadsRoot + "/$mangaId"
@@ -75,47 +83,55 @@ fun getMangaDownloadDir(
     sourceName: String,
 ): String = applicationDirs.mangaDownloadsRoot + "/" + getMangaDir(title, sourceName)
 
-fun getMangaDownloadDir(mangaId: Int): String = applicationDirs.mangaDownloadsRoot + "/" + getMangaDir(mangaId)
+suspend fun getMangaDownloadDir(mangaId: Int): String = applicationDirs.mangaDownloadsRoot + "/" + getMangaDir(mangaId)
 
 fun getMangaCacheDir(
     title: String,
     sourceName: String,
 ): String = applicationDirs.tempMangaCacheRoot + "/" + getMangaDir(title, sourceName)
 
-fun getChapterDownloadPath(
+suspend fun getChapterDownloadPath(
+    mangaId: Int,
+    title: String,
+    scanlator: String?,
+): String = applicationDirs.mangaDownloadsRoot + "/" + getChapterDir(mangaId, title, scanlator)
+
+suspend fun getChapterDownloadPath(
     mangaId: Int,
     chapterId: Int,
 ): String = applicationDirs.mangaDownloadsRoot + "/" + getChapterDir(mangaId, chapterId)
 
-fun getChapterCbzPath(
+suspend fun getChapterCbzPath(
     mangaId: Int,
     chapterId: Int,
 ): String = getChapterDownloadPath(mangaId, chapterId) + ".cbz"
 
-fun getChapterCachePath(
+suspend fun getChapterCachePath(
+    mangaId: Int,
+    title: String,
+    scanlator: String?,
+): String = applicationDirs.tempMangaCacheRoot + "/" + getChapterDir(mangaId, title, scanlator)
+
+suspend fun getChapterCachePath(
     mangaId: Int,
     chapterId: Int,
 ): String = applicationDirs.tempMangaCacheRoot + "/" + getChapterDir(mangaId, chapterId)
 
-private fun updateDownloadDir(
+private fun updateDir(
     currentDir: String,
     newDir: String,
 ): Boolean {
-    val currentDirFile = File(currentDir)
-    val newDirFile = File(newDir)
+    val currentDirPath = Path(currentDir)
+    val newDirPath = Path(newDir)
 
-    if (!currentDirFile.exists()) {
+    if (currentDirPath.notExists()) {
         return true
     }
 
     return try {
-        Files.move(currentDirFile.toPath(), newDirFile.toPath())
+        currentDirPath.moveTo(newDirPath)
 
-        if (currentDirFile.exists()) {
-            return false
-        }
-
-        if (!newDirFile.exists()) {
+        if (newDirPath.notExists()) {
             return false
         }
 
@@ -126,24 +142,58 @@ private fun updateDownloadDir(
     }
 }
 
-/** return value says if rename/move was successful */
-fun updateMangaDownloadDir(
-    title: String,
-    sourceName: String,
-    newTitle: String,
+private fun updateDownloadDir(
+    currentDownloadDir: String,
+    newDownloadDir: String,
+    currentCacheDir: String,
+    newCacheDir: String,
 ): Boolean {
-    val currentDownloadDir = getMangaDownloadDir(title, sourceName)
-    val newDownloadDir = getMangaDownloadDir(newTitle, sourceName)
-
-    val renamed = updateDownloadDir(currentDownloadDir, newDownloadDir)
+    val renamed = updateDir(currentDownloadDir, newDownloadDir)
 
     val tryToKeepCachedFilesUsable = renamed
     if (tryToKeepCachedFilesUsable) {
-        val currentCacheDir = getMangaCacheDir(title, sourceName)
-        val newCacheDir = getMangaCacheDir(newTitle, sourceName)
-
-        updateDownloadDir(currentCacheDir, newCacheDir)
+        updateDir(currentCacheDir, newCacheDir)
     }
 
     return renamed
 }
+
+private val mutexByManga = ConcurrentHashMap<Int, Mutex>()
+
+suspend fun updateChapterDownloadDir(
+    oldChapter: ChapterDataClass,
+    newChapter: ChapterDataClass,
+): Boolean {
+    if (oldChapter.mangaId != newChapter.mangaId) {
+        return false
+    }
+
+    return mutexByManga.getOrPut(oldChapter.mangaId) { Mutex() }.withLock {
+        val currentDownloadDir = getChapterDownloadPath(oldChapter.mangaId, oldChapter.name, oldChapter.scanlator)
+        val newDownloadDir = getChapterDownloadPath(oldChapter.mangaId, newChapter.name, newChapter.scanlator)
+
+        val currentCacheDir = getChapterCachePath(oldChapter.mangaId, oldChapter.name, oldChapter.scanlator)
+        val newCacheDir = getChapterCachePath(oldChapter.mangaId, newChapter.name, newChapter.scanlator)
+
+        withIOContext { updateDownloadDir(currentDownloadDir, newDownloadDir, currentCacheDir, newCacheDir) }
+    }
+}
+
+/** return value says if rename/move was successful */
+suspend fun updateMangaDownloadDir(
+    mangaId: Int,
+    title: String,
+    sourceName: String,
+    newTitle: String,
+): Boolean =
+    mutexByManga.getOrPut(mangaId) { Mutex() }.withLock {
+        val currentDownloadDir = getMangaDownloadDir(title, sourceName)
+        val newDownloadDir = getMangaDownloadDir(newTitle, sourceName)
+
+        val currentCacheDir = getMangaCacheDir(title, sourceName)
+        val newCacheDir = getMangaCacheDir(newTitle, sourceName)
+
+        withIOContext {
+            updateDownloadDir(currentDownloadDir, newDownloadDir, currentCacheDir, newCacheDir)
+        }
+    }

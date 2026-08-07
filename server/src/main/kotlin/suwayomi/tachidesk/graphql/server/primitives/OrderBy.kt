@@ -2,6 +2,7 @@ package suwayomi.tachidesk.graphql.server.primitives
 
 import org.jetbrains.exposed.v1.core.Column
 import org.jetbrains.exposed.v1.core.Op
+import org.jetbrains.exposed.v1.core.ResultRow
 import org.jetbrains.exposed.v1.core.SortOrder
 import org.jetbrains.exposed.v1.core.and
 import org.jetbrains.exposed.v1.core.dao.id.EntityID
@@ -26,6 +27,16 @@ interface Order<By : OrderBy<*>> {
     val by: By
     val byType: SortOrder?
 }
+
+fun SortOrder.reversed() =
+    when (this) {
+        SortOrder.ASC -> SortOrder.DESC
+        SortOrder.DESC -> SortOrder.ASC
+        SortOrder.ASC_NULLS_FIRST -> SortOrder.DESC_NULLS_LAST
+        SortOrder.ASC_NULLS_LAST -> SortOrder.DESC_NULLS_FIRST
+        SortOrder.DESC_NULLS_FIRST -> SortOrder.ASC_NULLS_LAST
+        SortOrder.DESC_NULLS_LAST -> SortOrder.ASC_NULLS_FIRST
+    }
 
 fun SortOrder?.maybeSwap(value: Any?): SortOrder =
     if (value != null) {
@@ -64,6 +75,71 @@ fun <T> Query.applyBeforeAfter(
         }
     }
 }
+
+fun <T : OrderBy<*>, Id : Any> Query.applySort(
+    sort: List<Order<T>>,
+    before: Id?,
+    last: Id?,
+    reverse: Boolean = false,
+): Query {
+    sort.forEach { order ->
+        val orderByColumn = order.by.column
+        val orderType = order.byType.maybeSwap(last ?: before)
+
+        val finalOrderType =
+            if (reverse) {
+                orderType.reversed()
+            } else {
+                orderType
+            }
+
+        this.orderBy(orderByColumn to finalOrderType)
+    }
+
+    return this
+}
+
+data class PaginationInfo<T : Any>(
+    val total: Long,
+    val firstResult: T? = null,
+    val lastResult: T? = null,
+)
+
+fun <T : OrderBy<*>, V : Any> Query.applySortAndGetPaginationInfo(
+    sort: List<Order<T>>,
+    before: Cursor?,
+    last: Int?,
+    selectValue: (resultRow: ResultRow?) -> V?,
+): PaginationInfo<V> {
+    val baseQuery = this.copy()
+
+    this.applySort(sort, before, last)
+
+    return PaginationInfo(
+        total = baseQuery.count(),
+        firstResult =
+            baseQuery
+                .copy()
+                .applySort(sort, before, last)
+                .limit(1)
+                .firstOrNull()
+                ?.let(selectValue),
+        lastResult =
+            baseQuery
+                .copy()
+                .applySort(sort, before, last, true)
+                .limit(1)
+                .firstOrNull()
+                ?.let(selectValue),
+    )
+}
+
+fun <T : OrderBy<*>, Id : Any> Query.applySortAndGetPaginationInfo(
+    sort: List<Order<T>>,
+    before: Cursor?,
+    last: Int?,
+    idColumn: Column<EntityID<Id>>,
+): PaginationInfo<Id> = applySortAndGetPaginationInfo(sort, before, last) { it?.get(idColumn)?.value }
 
 @JvmName("greaterNotUniqueIntKey")
 fun <T : Comparable<T>> greaterNotUnique(

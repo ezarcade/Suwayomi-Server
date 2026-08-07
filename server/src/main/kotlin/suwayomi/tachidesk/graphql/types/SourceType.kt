@@ -29,6 +29,7 @@ import suwayomi.tachidesk.manga.impl.util.source.GetSource.getSourceOrStub
 import suwayomi.tachidesk.manga.model.dataclass.ContentWarning
 import suwayomi.tachidesk.manga.model.table.ExtensionTable
 import suwayomi.tachidesk.manga.model.table.SourceTable
+import suwayomi.tachidesk.server.JavalinSetup.future
 import java.util.concurrent.CompletableFuture
 import androidx.preference.CheckBoxPreference as SourceCheckBoxPreference
 import androidx.preference.EditTextPreference as SourceEditTextPreference
@@ -73,16 +74,16 @@ class SourceType(
     fun extension(dataFetchingEnvironment: DataFetchingEnvironment): CompletableFuture<ExtensionType> =
         dataFetchingEnvironment.getValueFromDataLoader<Long, ExtensionType>("ExtensionForSourceDataLoader", id)
 
-    fun preferences(): List<Preference> = getSourcePreferencesRaw(id).map { preferenceOf(it) }
+    fun preferences(): CompletableFuture<List<Preference>> = future { getSourcePreferencesRaw(id).map { preferenceOf(it) } }
 
-    fun filters(): List<Filter> = getSourceOrStub(id).getFilterList().map { filterOf(it) }
+    fun filters(): CompletableFuture<List<Filter>> = future { getSourceOrStub(id).getFilterList().map { filterOf(it) } }
 
     fun meta(dataFetchingEnvironment: DataFetchingEnvironment): CompletableFuture<List<SourceMetaType>> =
         dataFetchingEnvironment.getValueFromDataLoader<Long, List<SourceMetaType>>("SourceMetaDataLoader", id)
 }
 
 @Suppress("ktlint:standard:function-naming")
-fun SourceType(row: ResultRow): SourceType? {
+suspend fun SourceType(row: ResultRow): SourceType? {
     val catalogueSource =
         GetSource
             .getSourceOrNull(row[SourceTable.id].value)
@@ -300,7 +301,14 @@ fun updateFilterList(
     changes: List<FilterChange>?,
 ): FilterList {
     val filterList = source.getFilterList()
+    applyFilterChanges(filterList, changes)
+    return filterList
+}
 
+private fun applyFilterChanges(
+    filterList: List<SourceFilter<*>>,
+    changes: List<FilterChange>?,
+) {
     changes?.forEach { change ->
         when (val filter = filterList[change.position]) {
             is SourceFilter.Header -> {
@@ -332,31 +340,11 @@ fun updateFilterList(
             }
 
             is SourceFilter.Group<*> -> {
-                val groupChange =
-                    change.groupChange
-                        ?: throw Exception("Expected group change at position ${change.position}")
-
-                when (val groupFilter = filter.state[groupChange.position]) {
-                    is SourceFilter.CheckBox -> {
-                        groupFilter.state = groupChange.checkBoxState
-                            ?: throw Exception("Expected checkbox state change at position ${change.position}")
-                    }
-
-                    is SourceFilter.TriState -> {
-                        groupFilter.state = groupChange.triState?.ordinal
-                            ?: throw Exception("Expected tri state change at position ${change.position}")
-                    }
-
-                    is SourceFilter.Text -> {
-                        groupFilter.state = groupChange.textState
-                            ?: throw Exception("Expected text state change at position ${change.position}")
-                    }
-
-                    is SourceFilter.Select<*> -> {
-                        groupFilter.state = groupChange.selectState
-                            ?: throw Exception("Expected select state change at position ${change.position}")
-                    }
-                }
+                @Suppress("UNCHECKED_CAST")
+                applyFilterChanges(
+                    filter.state as List<SourceFilter<*>>,
+                    listOf(change.groupChange ?: throw Exception("Expected group change at position ${change.position}")),
+                )
             }
 
             is SourceFilter.Sort -> {
@@ -366,7 +354,6 @@ fun updateFilterList(
             }
         }
     }
-    return filterList
 }
 
 sealed interface Preference
