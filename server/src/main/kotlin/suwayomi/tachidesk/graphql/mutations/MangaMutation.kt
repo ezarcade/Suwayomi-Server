@@ -6,6 +6,7 @@ import com.expediagroup.graphql.generator.annotations.GraphQLDeprecated
 import com.expediagroup.graphql.server.extensions.toGraphQLError
 import graphql.execution.DataFetcherResult
 import io.github.oshai.kotlinlogging.KotlinLogging
+import kotlinx.coroutines.runBlocking
 import org.jetbrains.exposed.v1.core.LikePattern
 import org.jetbrains.exposed.v1.core.Op
 import org.jetbrains.exposed.v1.core.and
@@ -448,7 +449,7 @@ class MangaMutation {
             rows.map { row ->
                 val id = row[ChapterTable.id].value
                 val imageCount = try {
-                    ChapterDownloadHelper.getImageCount(mangaId, id)
+                    runBlocking { ChapterDownloadHelper.getImageCount(mangaId, id) }
                 } catch (e: Exception) {
                     -1
                 }

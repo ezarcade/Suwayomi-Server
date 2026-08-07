@@ -210,14 +210,14 @@ class Downloader(
                 step(downloadChapter?.let { DownloadUpdate(PROGRESS, downloadChapter) }, immediate)
             }
             download.state = Finished
-            transaction {
+            val duplicateChapterIds = transaction {
                 ChapterTable.update(
                     { (ChapterTable.id eq download.chapterId) },
                 ) {
                     it[isDownloaded] = true
                 }
 
-                val duplicateChapterIds = ChapterTable
+                ChapterTable
                     .selectAll()
                     .where {
                         (ChapterTable.manga eq download.mangaId) and
@@ -226,12 +226,14 @@ class Downloader(
                         not(ChapterTable.id eq download.chapterId)
                     }
                     .map { it[ChapterTable.id].value }
+            }
 
-                if (duplicateChapterIds.isNotEmpty()) {
-                    downloadLogger.debug { "deleting duplicate chapters: $duplicateChapterIds" }
-                    duplicateChapterIds.forEach { dupId ->
-                        ChapterDownloadHelper.delete(download.mangaId, dupId)
-                    }
+            if (duplicateChapterIds.isNotEmpty()) {
+                downloadLogger.debug { "deleting duplicate chapters: $duplicateChapterIds" }
+                duplicateChapterIds.forEach { dupId ->
+                    ChapterDownloadHelper.delete(download.mangaId, dupId)
+                }
+                transaction {
                     ChapterTable.update({ ChapterTable.id inList duplicateChapterIds }) {
                         it[isDownloaded] = false
                     }

@@ -10,6 +10,7 @@ package suwayomi.tachidesk.graphql.queries
 import com.expediagroup.graphql.generator.annotations.GraphQLDeprecated
 import com.expediagroup.graphql.server.extensions.getValueFromDataLoader
 import graphql.schema.DataFetchingEnvironment
+import kotlinx.coroutines.runBlocking
 import org.jetbrains.exposed.v1.core.Column
 import org.jetbrains.exposed.v1.core.Op
 import org.jetbrains.exposed.v1.core.SortOrder
@@ -354,8 +355,8 @@ class MangaQuery {
                 .map { ChapterTable.toDataClass(it) }
 
             chapters.filter { chapter ->
-                val folder = File(getChapterDownloadPath(mangaId, chapter.id))
-                val cbz = File(getChapterCbzPath(mangaId, chapter.id))
+                val folder = File(runBlocking { getChapterDownloadPath(mangaId, chapter.id) })
+                val cbz = File(runBlocking { getChapterCbzPath(mangaId, chapter.id) })
                 folder.exists() || cbz.exists()
             }.map { ChapterType(it) }
         }
