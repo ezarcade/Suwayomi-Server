@@ -715,9 +715,17 @@ object Extension {
     }
 
     suspend fun updateExtension(pkgName: String): String {
-        val targetExtension = ExtensionsList.updateMap.remove(pkgName)!!
+        val targetExtension = ExtensionsList.updateMap.remove(pkgName)
+            ?: run {
+                ExtensionsList.fetchExtensions()
+                ExtensionsList.updateMap.remove(pkgName)
+            }
 
-        logger.debug { "Updating $pkgName to ${targetExtension.versionName}" }
+        if (targetExtension != null) {
+            logger.debug { "Updating $pkgName to ${targetExtension.versionName}" }
+        } else {
+            logger.warn { "No update info found for $pkgName, proceeding with install anyway" }
+        }
 
         return installExtension(pkgName, true)
     }
