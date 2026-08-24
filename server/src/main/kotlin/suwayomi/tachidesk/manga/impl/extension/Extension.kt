@@ -723,15 +723,11 @@ object Extension {
 
     suspend fun updateExtension(pkgName: String): String {
         val targetExtension = ExtensionsList.updateMap.remove(pkgName)
-            ?: run {
-                ExtensionsList.fetchExtensions()
-                ExtensionsList.updateMap.remove(pkgName)
-            }
 
         if (targetExtension != null) {
             logger.debug { "Updating $pkgName to ${targetExtension.versionName}" }
         } else {
-            logger.warn { "No update info found for $pkgName, proceeding with install anyway" }
+            logger.debug { "Updating $pkgName (no cached update info, proceeding with DB info)" }
         }
 
         return installExtension(pkgName, true)
