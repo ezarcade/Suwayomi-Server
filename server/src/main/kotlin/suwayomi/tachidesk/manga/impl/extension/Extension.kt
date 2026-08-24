@@ -427,6 +427,18 @@ object Extension {
         logger.debug { "Main class for extension is $className" }
 
         val extensionsRoot = Path(applicationDirs.extensionsRoot)
+
+        // Unload old extension BEFORE preparing new jar to release the file lock on the old JAR
+        val alreadyInstalled = transaction {
+            ExtensionTable
+                .select(ExtensionTable.isInstalled)
+                .where { ExtensionTable.pkgName eq pkgName }
+                .firstOrNull()?.get(ExtensionTable.isInstalled)
+        } ?: false
+        if (alreadyInstalled) {
+            unload(pkgName = pkgName, withSources = true)
+        }
+
         val jarFile = extPackage.prepareJarAndIcons(extensionsRoot)
 
         val oldJarFile =
@@ -451,11 +463,6 @@ object Extension {
                             .getString(METADATA_EXTENSION_LIB)
                             .takeUnless { it == "0" }
                             ?: metadata.versionName.substringBeforeLast('.')
-
-                    val unloadOldJar = isInstalled
-                    if (unloadOldJar) {
-                        unload(pkgName = pkgName, withSources = true)
-                    }
 
                     setupJar(
                         extensionMainClassInstance = loadExtensionSources(jarFile, className),
