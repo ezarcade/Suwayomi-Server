@@ -24,6 +24,7 @@ import io.github.reactivecircus.cache4k.Cache
 import io.javalin.http.HttpStatus
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.Json
 import okhttp3.CacheControl
 import okhttp3.Response
 import org.jetbrains.exposed.v1.core.ResultRow
@@ -534,7 +535,7 @@ object Manga {
                 .orderBy(ChapterTable.sourceOrder to SortOrder.DESC)
                 .map { ChapterTable.toDataClass(it) }
         }.filter { chapter ->
-            val scanlatorOk = filteredScanlators.isEmpty() || chapter.scanlator !in filteredScanlators
+            val scanlatorOk = filteredScanlators.isEmpty() || chapter.scanlator.orEmpty() !in filteredScanlators
             scanlatorOk && !hidingRules.shouldHide(chapter.chapterNumber, chapter.scanlator, allChapterNumbers)
         }
     }
